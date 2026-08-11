@@ -159,29 +159,158 @@ pub fn page_text(path: &Path, index: usize) -> Result<Vec<TextRun>> {
         if index >= count {
             return Err(anyhow!("page {} of {}", index + 1, count));
         }
-        let page = doc.pages().get(index as u16)?;
-        let height = page.height().value;
-        let text = page.text()?;
-        let mut runs = Vec::new();
-        for segment in text.segments().iter() {
-            let content = segment.text();
-            if content.trim().is_empty() {
-                continue;
-            }
-            let b = segment.bounds();
-            // PDF measures up from the bottom of the page; screens measure down
-            // from the top.
-            runs.push(TextRun {
-                x: b.left.value,
-                y: height - b.top.value,
-                w: (b.right.value - b.left.value).max(0.0),
-                h: (b.top.value - b.bottom.value).max(0.0),
-                text: content,
-            });
-        }
-        Ok(runs)
+        runs_on(&doc.pages().get(index as u16)?)
     })
 }
+
+/// The runs on one page.
+///
+/// Search and selection both come through here, and they have to: a hit's
+/// offsets are only meaningful against the same text the reader laid out, so
+/// the two must agree on which segments count and in what order. Extracting
+/// them twice with two rules is how a search result ends up highlighting the
+/// wrong words.
+fn runs_on(page: &PdfPage) -> Result<Vec<TextRun>> {
+    let height = page.height().value;
+    let text = page.text()?;
+    let mut runs = Vec::new();
+    for segment in text.segments().iter() {
+        let content = segment.text();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let b = segment.bounds();
+        // PDF measures up from the bottom of the page; screens measure down
+        // from the top.
+        runs.push(TextRun {
+            x: b.left.value,
+            y: height - b.top.value,
+            w: (b.right.value - b.left.value).max(0.0),
+            h: (b.top.value - b.bottom.value).max(0.0),
+            text: content,
+        });
+    }
+    Ok(runs)
+}
+
+/// A place in the document where the query appears.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub page: usize,
+    /// Character offsets into that page's text, in the units the reader counts
+    /// in — see `u16_offsets`.
+    pub start: usize,
+    pub end: usize,
+    /// The match with a little of the sentence around it.
+    pub snippet: String,
+}
+
+/// Stop before a runaway query fills the panel with thousands of rows.
+const MAX_HITS: usize = 500;
+/// Characters of context either side of a match in the snippet.
+const SNIPPET_CONTEXT: usize = 48;
+
+/// Find every occurrence of `query`, case-insensitively, across the document.
+///
+/// No index. Extracting a page's text costs single-digit milliseconds, so a
+/// five-hundred-page book scans in about a second — cheaper than building an
+/// index, and far cheaper than keeping one honest as the file changes.
+pub fn search(path: &Path, query: &str) -> Result<Vec<SearchHit>> {
+    let needle: Vec<char> = fold(query.trim());
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_pdfium(|pdfium| {
+        let doc = pdfium
+            .load_pdf_from_file(path, None)
+            .with_context(|| format!("open {}", path.display()))?;
+        let mut hits = Vec::new();
+        for (index, page) in doc.pages().iter().enumerate() {
+            if hits.len() >= MAX_HITS {
+                break;
+            }
+            let text: String = runs_on(&page)?.iter().map(|r| r.text.as_str()).collect();
+            let chars: Vec<char> = text.chars().collect();
+            let hay = fold(&text);
+            let offsets = u16_offsets(&chars);
+            for at in find_all(&hay, &needle, MAX_HITS - hits.len()) {
+                hits.push(SearchHit {
+                    page: index,
+                    start: offsets[at],
+                    end: offsets[at + needle.len()],
+                    snippet: snippet(&chars, at, needle.len()),
+                });
+            }
+        }
+        Ok(hits)
+    })
+}
+
+/// Lower-case one character per character.
+///
+/// `to_lowercase` can return more than one — ss for a German sharp s — which
+/// would slide every offset after it. Matching is worth a little less
+/// correctness in those cases; pointing at the wrong words is not.
+fn fold(s: &str) -> Vec<char> {
+    s.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
+/// Where each character starts, counted in UTF-16 code units.
+///
+/// That is what the reader counts in, because a JavaScript string's length is
+/// in UTF-16 units rather than characters. For anything outside the basic
+/// plane — an emoji, some rarer CJK — the two disagree, and a hit would
+/// highlight the wrong words.
+fn u16_offsets(chars: &[char]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(chars.len() + 1);
+    let mut n = 0;
+    for c in chars {
+        out.push(n);
+        n += c.len_utf16();
+    }
+    out.push(n);
+    out
+}
+
+fn find_all(hay: &[char], needle: &[char], limit: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return out;
+    }
+    let mut i = 0;
+    while i + needle.len() <= hay.len() && out.len() < limit {
+        if hay[i..i + needle.len()] == *needle {
+            out.push(i);
+            // Overlapping repeats of the same phrase are one finding rather
+            // than several: step past what was just matched.
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn snippet(chars: &[char], at: usize, len: usize) -> String {
+    let from = at.saturating_sub(SNIPPET_CONTEXT);
+    let to = (at + len + SNIPPET_CONTEXT).min(chars.len());
+    let body: String = chars[from..to].iter().collect();
+    // Runs are joined without separators, so a snippet carries whatever line
+    // breaks and runs of spaces the layout had. Collapse them, or the panel
+    // shows ragged holes.
+    let mut s = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if from > 0 {
+        s.insert(0, ELLIPSIS);
+    }
+    if to < chars.len() {
+        s.push(ELLIPSIS);
+    }
+    s
+}
+
+const ELLIPSIS: char = '\u{2026}';
 
 /// Rasterise one page to a PNG at `width` pixels across.
 ///
@@ -498,6 +627,81 @@ mod tests {
     }
 
     #[test]
+    fn folds_one_character_per_character() {
+        // The offsets a hit reports index the reader's text, so folding must
+        // not change how many characters there are.
+        for s in ["Hello", "STRASSE", "Ärger", "ǅungla", "naïve"] {
+            assert_eq!(
+                fold(s).len(),
+                s.chars().count(),
+                "folding {s:?} changed the character count"
+            );
+        }
+        assert_eq!(fold("MiXeD").iter().collect::<String>(), "mixed");
+    }
+
+    #[test]
+    fn counts_offsets_the_way_javascript_does() {
+        // A reader counts in UTF-16 units, so anything outside the basic plane
+        // takes two. Getting this wrong slides every later hit on the page.
+        let chars: Vec<char> = "aB\u{1F600}c".chars().collect();
+        assert_eq!(u16_offsets(&chars), vec![0, 1, 2, 4, 5]);
+        let plain: Vec<char> = "abc".chars().collect();
+        assert_eq!(u16_offsets(&plain), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn finds_each_occurrence_once() {
+        let hay: Vec<char> = "the cat sat on the mat".chars().collect();
+        let needle: Vec<char> = "at".chars().collect();
+        assert_eq!(find_all(&hay, &needle, 99), vec![5, 9, 20]);
+
+        // A repeated phrase is one finding per occurrence, not one per
+        // starting position inside it.
+        let aaa: Vec<char> = "aaaa".chars().collect();
+        let aa: Vec<char> = "aa".chars().collect();
+        assert_eq!(find_all(&aaa, &aa, 99), vec![0, 2]);
+
+        assert_eq!(find_all(&hay, &needle, 2).len(), 2, "the limit is respected");
+        assert!(find_all(&hay, &[], 9).is_empty(), "an empty query matches nothing");
+        assert!(
+            find_all(&[], &needle, 9).is_empty(),
+            "an empty page matches nothing"
+        );
+        let long: Vec<char> = "xxxxxxxx".chars().collect();
+        assert!(
+            find_all(&needle, &long, 9).is_empty(),
+            "a query longer than the text matches nothing"
+        );
+    }
+
+    #[test]
+    fn snippets_carry_context_without_the_layout() {
+        let chars: Vec<char> = "alpha   beta\ngamma delta".chars().collect();
+        // Runs join without separators, so the raw text keeps the layout's
+        // line breaks and double spaces; a snippet should read as a sentence.
+        let s = snippet(&chars, 8, 4);
+        assert!(s.contains("alpha beta gamma"), "got {s:?}");
+        assert!(!s.contains('\n'), "newlines should be collapsed: {s:?}");
+        assert!(!s.contains("  "), "runs of spaces should be collapsed: {s:?}");
+
+        // Truncated on both sides when there is more text around it.
+        let long: Vec<char> = "z".repeat(400).chars().collect();
+        let mid = snippet(&long, 200, 1);
+        assert!(mid.starts_with('\u{2026}') && mid.ends_with('\u{2026}'), "got {mid:?}");
+        // And not when the match is at the very start.
+        let head = snippet(&long, 0, 1);
+        assert!(!head.starts_with('\u{2026}'), "got {head:?}");
+    }
+
+    #[test]
+    fn search_finds_nothing_for_an_empty_query() {
+        let path = build_pdf();
+        assert!(search(&path, "   ").unwrap().is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn reads_page_requests() {
         assert_eq!(page_index("page/0"), Some(0));
         assert_eq!(page_index("page/41"), Some(41));
@@ -523,6 +727,7 @@ mod tests {
         assert_eq!(width_from_query(Some("w=-5")), MIN_WIDTH);
     }
 }
+
 
 
 

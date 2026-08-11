@@ -211,6 +211,15 @@ export interface TextRun {
   text: string;
 }
 
+/** Somewhere in a PDF that the query appears. */
+export interface PdfHit {
+  page: number;
+  /** Character offsets into that page's text, matching what the reader lays out. */
+  start: number;
+  end: number;
+  snippet: string;
+}
+
 export interface PdfSession {
   /**
    * Every page's size, known before anything has been rendered. This is what
@@ -304,6 +313,7 @@ export const api = {
   comicOpen: (id: number) => invoke<ComicSession>("comic_open", { id }),
   pdfOpen: (id: number) => invoke<PdfSession>("pdf_open", { id }),
   pdfText: (id: number, page: number) => invoke<TextRun[]>("pdf_text", { id, page }),
+  pdfSearch: (id: number, query: string) => invoke<PdfHit[]>("pdf_search", { id, query }),
   /** Returns how many books were changed. */
   setReadingDirection: (id: number, direction: ReadingDirection, wholeSeries: boolean) =>
     invoke<number>("set_reading_direction", { id, direction, wholeSeries }),

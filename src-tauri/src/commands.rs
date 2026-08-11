@@ -252,6 +252,20 @@ pub fn pdf_open(state: State<'_, AppState>, id: i64) -> CmdResult<PdfSession> {
     })
 }
 
+/// Every occurrence of `query` in a PDF.
+///
+/// Scanned on demand rather than from an index. A five-hundred-page book takes
+/// about a second, which is a fine price for never having a stale index and
+/// never having to decide when to rebuild one.
+#[tauri::command]
+pub fn pdf_search(state: State<'_, AppState>, id: i64, query: String) -> CmdResult<Vec<crate::pdf::SearchHit>> {
+    let path = {
+        let conn = state.conn.lock().map_err(s)?;
+        db::require_book(&conn, id).map_err(s)?.path
+    };
+    crate::pdf::search(std::path::Path::new(&path), &query).map_err(|e| format!("{e:#}"))
+}
+
 // ---------------- built-in comic reader ----------------
 
 /// Everything the comic reader needs: the page list, where its images come

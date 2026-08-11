@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Annotation, api, Book, ComicLocator, PdfSession, TextRun } from "../api";
+import { Annotation, api, Book, ComicLocator, PdfHit, PdfSession, TextRun } from "../api";
 import {
   buildSpreads,
   PAGE_GAP,
@@ -51,6 +51,21 @@ const MODE_KEY = "bv.pdfMode";
 const FIT_KEY = "bv.pdfFit";
 const ZOOM_KEY = "bv.pdfZoom";
 
+type Panel = "contents" | "search" | null;
+
+/** Colour key for the mark on a search result — not one of the palette. */
+const SEEK = "seek";
+
+/**
+ * What a mark is painted in. The highlight palette, plus a colour for a search
+ * hit that is deliberately none of them: a result you jumped to should not look
+ * like something you highlighted earlier.
+ */
+const MARK_COLORS: Record<string, string> = {
+  ...HIGHLIGHT_COLORS,
+  [SEEK]: "rgba(249, 115, 22, .5)",
+};
+
 /** How many screens either side of the viewport to keep rendered. */
 const OVERSCAN = 1;
 /** A wheel gesture shouldn't fire a second turn until it settles. */
@@ -94,7 +109,16 @@ export default function PdfReader({
   const [loaded, setLoaded] = useState<Set<string>>(() => new Set());
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [scrollTop, setScrollTop] = useState(0);
-  const [contents, setContents] = useState(false);
+  /** Which side panel is open, if any. They share the column. */
+  const [panel, setPanel] = useState<Panel>(null);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<PdfHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  /**
+   * The hit to keep marked, so a result you jumped to is visible on the page
+   * rather than leaving you to find it yourself.
+   */
+  const [flash, setFlash] = useState<PdfHit | null>(null);
   /**
    * Selectable text, by page. Fetched as pages come into view rather than with
    * the session: a page costs a few milliseconds to extract, which is nothing
@@ -520,6 +544,51 @@ export default function PdfReader({
     [runs, highlightsByPage, captureSelection]
   );
 
+  // ---- find in document ----
+  const runSearch = useCallback(async () => {
+    const q = query.trim();
+    if (q.length < 2) return;
+    setSearching(true);
+    setFlash(null);
+    try {
+      setHits(await api.pdfSearch(book.id, q));
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setSearching(false);
+    }
+  }, [book.id, query]);
+
+  // A mark belongs to the result list that produced it. Closing the panel
+  // leaves an orange smear on the page with nothing to explain it.
+  useEffect(() => {
+    if (panel !== "search") setFlash(null);
+  }, [panel]);
+
+  /** Jump to a hit and mark it, since a page of prose hides a phrase well. */
+  const gotoHit = useCallback(
+    (hit: PdfHit) => {
+      setFlash(hit);
+      goTo(hit.page);
+    },
+    [goTo]
+  );
+
+  /**
+   * What each page draws: its stored highlights, plus the search mark when the
+   * flashed hit is on it. The mark rides the same machinery as a highlight
+   * because it is the same thing — a character range turned into rectangles.
+   */
+  const marksFor = useCallback(
+    (p: number): PageHighlight[] => {
+      const stored = highlightsByPage.get(p);
+      if (!flash || flash.page !== p) return stored ?? noHighlights;
+      const mark: PageHighlight = { id: -1, start: flash.start, end: flash.end, color: SEEK };
+      return stored ? [...stored, mark] : [mark];
+    },
+    [highlightsByPage, flash, noHighlights]
+  );
+
   /** Which outline entry the reader is inside: the last one at or before it. */
   const currentOutline = useMemo(() => {
     let best = -1;
@@ -552,15 +621,24 @@ export default function PdfReader({
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el?.tagName === "INPUT" || el?.tagName === "TEXTAREA") return;
-      // A shortcut is the bare key; Ctrl and friends belong to whoever else
-      // wants them.
+      // Ctrl+F is the one chord worth taking: it means find in this document
+      // everywhere else, and a reader that ignored it would be the odd one out.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "f" || e.code === "KeyF")) {
+        e.preventDefault();
+        setPanel("search");
+        return;
+      }
+      // Every other shortcut is the bare key; Ctrl and friends belong to
+      // whoever else wants them.
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const is = (letter: string, code: string) =>
         e.key === letter || e.key === letter.toUpperCase() || e.code === code;
 
       if (e.key === "Escape") {
-        // One layer at a time: the menu, then fullscreen, then the window.
+        // One layer at a time: the menu, then a panel, then fullscreen, then
+        // the window.
         if (menu) setMenu(null);
+        else if (panel) setPanel(null);
         else if (fullscreen) setFull(false);
         else onClose?.();
         return;
@@ -578,7 +656,7 @@ export default function PdfReader({
       // Same key as the book reader's contents, because it is the same thing.
       if (is("c", "KeyC")) {
         e.preventDefault();
-        setContents((c) => !c);
+        setPanel((p) => (p === "contents" ? null : "contents"));
         return;
       }
       if (e.key === "+" || e.key === "=") {
@@ -627,7 +705,7 @@ export default function PdfReader({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [turn, goTo, count, onClose, fullscreen, setFull, mode, stepZoom, menu]);
+  }, [turn, goTo, count, onClose, fullscreen, setFull, mode, stepZoom, menu, panel]);
 
   /** Paging by wheel, once the page itself has nothing left to scroll. */
   useEffect(() => {
@@ -695,7 +773,7 @@ export default function PdfReader({
             </button>
           )}
           <button
-            onClick={() => setContents((c) => !c)}
+            onClick={() => setPanel((p) => (p === "contents" ? null : "contents"))}
             disabled={!session?.outline.length}
             title={
               session && !session.outline.length
@@ -704,12 +782,24 @@ export default function PdfReader({
             }
             className={cx(
               "shrink-0 rounded-md p-2 transition-colors disabled:opacity-25",
-              contents
+              panel === "contents"
                 ? "bg-white/15 text-white"
                 : "text-white/50 hover:bg-white/10 hover:text-white"
             )}
           >
             <Icon name="list" className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => setPanel((p) => (p === "search" ? null : "search"))}
+            title="Find in document (Ctrl+F)"
+            className={cx(
+              "shrink-0 rounded-md p-2 transition-colors",
+              panel === "search"
+                ? "bg-white/15 text-white"
+                : "text-white/50 hover:bg-white/10 hover:text-white"
+            )}
+          >
+            <Icon name="search" className="h-4 w-4" />
           </button>
           <div className="min-w-0 flex-1 text-center">
             <div className="truncate text-[13px] font-medium text-white/80">{book.title}</div>
@@ -844,7 +934,61 @@ export default function PdfReader({
       )}
 
       <div className="flex min-h-0 flex-1">
-        {contents && (
+        {panel === "search" && (
+          <aside className="flex w-80 shrink-0 flex-col border-r border-white/10">
+            <div className="p-2">
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") runSearch();
+                  if (e.key === "Escape") setPanel(null);
+                }}
+                placeholder="Find in document…"
+                className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none placeholder:text-white/30 focus:border-accent-500/50"
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {searching ? (
+                <div className="flex items-center gap-2 px-3 py-3 text-xs text-white/40">
+                  <Spinner className="h-3.5 w-3.5" /> Searching…
+                </div>
+              ) : hits === null ? (
+                <p className="px-3 py-2 text-[11px] leading-relaxed text-white/30">
+                  Searches every page. Press Enter to run.
+                </p>
+              ) : hits.length === 0 ? (
+                <p className="px-3 py-2 text-[11px] text-white/30">No matches.</p>
+              ) : (
+                <>
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-white/25">
+                    {hits.length} match{hits.length === 1 ? "" : "es"}
+                  </div>
+                  {hits.map((h, i) => (
+                    <button
+                      key={i}
+                      onClick={() => gotoHit(h)}
+                      className={cx(
+                        "block w-full border-b border-white/5 px-3 py-2 text-left transition-colors hover:bg-white/5",
+                        flash === h && "bg-white/10"
+                      )}
+                    >
+                      <div className="text-[10px] uppercase tracking-wide text-white/25">
+                        Page {h.page + 1}
+                      </div>
+                      <div className="mt-0.5 line-clamp-3 text-[12px] leading-snug text-white/60">
+                        {h.snippet}
+                      </div>
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          </aside>
+        )}
+
+        {panel === "contents" && (
           <nav className="w-72 shrink-0 overflow-y-auto border-r border-white/10 py-2">
             {session?.outline.length ? (
               session.outline.map((t, i) => (
@@ -942,7 +1086,7 @@ export default function PdfReader({
                       page={i}
                       runs={runs.get(i) ?? []}
                       scale={scaleFor(i)}
-                      highlights={highlightsByPage.get(i) ?? noHighlights}
+                      highlights={marksFor(i)}
                       register={registerRuns}
                     />
                   </div>
@@ -1006,7 +1150,7 @@ export default function PdfReader({
                         page={i}
                         runs={runs.get(i) ?? []}
                         scale={scaleFor(i)}
-                        highlights={highlightsByPage.get(i) ?? noHighlights}
+                        highlights={marksFor(i)}
                         register={registerRuns}
                       />
                     </div>
@@ -1194,7 +1338,7 @@ export function TextLayer({
               top: m.y,
               width: m.w,
               height: m.h,
-              background: HIGHLIGHT_COLORS[m.color] ?? HIGHLIGHT_COLORS.yellow,
+              background: MARK_COLORS[m.color] ?? MARK_COLORS.yellow,
               mixBlendMode: "multiply",
             }}
           />

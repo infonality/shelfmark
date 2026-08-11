@@ -135,6 +135,7 @@ pub fn run() {
             commands::comic_open,
             commands::pdf_open,
             commands::pdf_text,
+            commands::pdf_search,
             commands::set_reading_direction,
             commands::list_annotations,
             commands::add_annotation,

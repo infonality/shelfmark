@@ -1,6 +1,6 @@
 [package]
 name = "shelfmark"
-version = "0.5.16"
+version = "0.5.17"
 description = "Shelfmark - personal library and reader for ebooks and comics"
 authors = ["Kas"]
 edition = "2021"
