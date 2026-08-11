@@ -117,6 +117,7 @@ export default function Reader({
   const [prefs, setPrefs] = useState<ReaderPrefs>(loadPrefs);
   const [cols, setCols] = useState<1 | 2>(1);
   const [fullscreen, setFullscreen] = useState(false);
+  const [chrome, setChrome] = useState(true);
 
   const frameRef = useRef<HTMLIFrameElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -433,15 +434,17 @@ export default function Reader({
   goToRef.current = goToChapter;
 
   /**
-   * Fullscreen the window. Unlike the comic reader this leaves the chrome up:
-   * the header carries the chapter you're in and how far through you are, and
-   * a book is read for long enough that losing both is a poor trade for two
-   * thin strips of screen.
+   * Fullscreen hides the chrome on the way in and brings it back on the way
+   * out, as the other two readers do. This version kept the header up on the
+   * argument that a book is read long enough to want the chapter and the
+   * progress in view — but that is a preference, and I is now there to settle
+   * it either way rather than the reader deciding for you.
    */
   const setFull = useCallback(async (want: boolean) => {
     try {
       await getCurrentWindow().setFullscreen(want);
       setFullscreen(want);
+      setChrome(!want);
     } catch {
       /* a window manager that refuses just leaves us as we were */
     }
@@ -530,6 +533,11 @@ export default function Reader({
       if (is("f", "KeyF")) {
         e.preventDefault();
         setFull(!fullscreen);
+        return;
+      }
+      if (is("i", "KeyI")) {
+        e.preventDefault();
+        setChrome((c) => !c);
         return;
       }
       if (is("c", "KeyC")) {
@@ -669,6 +677,7 @@ export default function Reader({
       }}
     >
       {/* Chrome */}
+      {chrome && (
       <header
         data-tauri-drag-region
         className="flex shrink-0 items-center gap-2 px-3 py-2"
@@ -736,7 +745,11 @@ export default function Reader({
         </button>
         <button
           onClick={() => setFull(!fullscreen)}
-          title={fullscreen ? "Leave fullscreen (F or Esc)" : "Fullscreen (F)"}
+          title={
+            fullscreen
+              ? "Leave fullscreen (F or Esc) — press I to bring these controls back"
+              : "Fullscreen (F)"
+          }
           className="rounded-md p-2 text-white/50 hover:bg-white/10 hover:text-white"
         >
           <Icon name={fullscreen ? "collapse" : "expand"} className="h-4 w-4" />
@@ -754,6 +767,7 @@ export default function Reader({
           {Math.round(percent * 100)}%
         </div>
       </header>
+      )}
 
       <div className="relative flex min-h-0 flex-1">
         {panel === "toc" && (
@@ -892,11 +906,17 @@ export default function Reader({
           </aside>
         )}
 
-        {/* The paper */}
-        <div className="relative min-w-0 flex-1 px-6 pb-3">
+        {/* The paper. With the chrome hidden it fills the window instead of
+            sitting inset on the dark surround — the inset is what makes it read
+            as a page on a desk, and with nothing else on screen it just reads
+            as a border. */}
+        <div className={cx("relative min-w-0 flex-1", chrome && "px-6 pb-3")}>
           <div
             ref={hostRef}
-            className="relative h-full w-full overflow-hidden rounded-md shadow-[0_10px_40px_rgba(0,0,0,.45)]"
+            className={cx(
+              "relative h-full w-full overflow-hidden",
+              chrome && "rounded-md shadow-[0_10px_40px_rgba(0,0,0,.45)]"
+            )}
             style={{ background: THEMES[prefs.theme].bg }}
           >
             {error ? (
@@ -941,6 +961,7 @@ export default function Reader({
       </div>
 
       {/* Footer */}
+      {chrome && (
       <footer className="flex shrink-0 items-center gap-3 px-6 pb-2 pt-1">
         <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-white/10">
           <div
@@ -952,6 +973,7 @@ export default function Reader({
           {page + 1} of {pages}
         </span>
       </footer>
+      )}
 
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={setPrefs} onClose={() => setPrefsOpen(false)} />
