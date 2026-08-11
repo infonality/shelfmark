@@ -231,6 +231,21 @@ textarea {
   user-select: text;
 }
 
+/* The PDF text layer is invisible text laid over a picture of the same text.
+ *
+ * Selecting it must not paint that text. The browser's default selection draws
+ * the glyphs in its own foreground colour, which overrides the transparent one
+ * and writes the words a second time in whatever font this machine substituted
+ * for the document's — so a selection looked like the paragraph had been
+ * retypeset rather than highlighted.
+ *
+ * Keeping the glyphs transparent through the selection, and tinting rather
+ * than covering, leaves the printed words showing through the highlight. */
+.pdf-text-layer ::selection {
+  color: transparent;
+  background-color: rgb(59 130 246 / 0.35);
+}
+
 /* Match native <select> dropdowns to the theme; WebView2 otherwise renders the
    option list with the system background regardless of the page. */
 select {

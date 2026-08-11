@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "shelfmark"
-version = "0.5.9"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "image",

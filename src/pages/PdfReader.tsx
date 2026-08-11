@@ -7,6 +7,7 @@ import {
   pageAtOffset,
   pageUrl,
   renderWidth,
+  snapToDevice,
   stackLayout,
   visibleRange,
 } from "../pdf-layout";
@@ -142,7 +143,21 @@ export default function PdfReader({
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const measure = () => setBox({ w: el.clientWidth, h: el.clientHeight });
+    const measure = () => {
+      // `clientWidth` rounds to whole css pixels, and at a fractional display
+      // scale the content width isn't whole — 2560 device pixels at 150% is
+      // 1706.67css. Rounding that throws away the third of a pixel and puts
+      // every page slightly off the device grid, which is exactly the
+      // resampling the rest of the sizing works to avoid. It shows up
+      // fullscreen because that is when the viewport is the whole screen and
+      // no longer happens to divide evenly.
+      //
+      // `getBoundingClientRect` keeps the fraction but includes the scrollbar,
+      // which has to come off by hand.
+      const rect = el.getBoundingClientRect();
+      const scrollbar = el.offsetWidth - el.clientWidth;
+      setBox({ w: Math.max(0, rect.width - scrollbar), h: rect.height });
+    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -165,13 +180,14 @@ export default function PdfReader({
   const pair = shown.length > 1;
 
   /**
-   * Page width in CSS pixels.
+   * How wide the page wants to be, before it is made to line up with the
+   * pixel grid.
    *
    * Scrolling always fits the width and lets zoom take it from there — fitting
    * the height while scrolling vertically would put exactly one page on screen,
    * which is paging with extra steps.
    */
-  const pageWidth = useMemo(() => {
+  const wantWidth = useMemo(() => {
     if (box.w < 2) return 0;
     if (mode === "scroll") return Math.max(80, (box.w - 32) * zoom);
     const avail = pair ? (box.w - PAGE_GAP) / 2 : box.w;
@@ -183,14 +199,27 @@ export default function PdfReader({
     return Math.max(80, box.h * zoom * ratio);
   }, [mode, box, zoom, fit, pair, sizes, shown]);
 
-  const width = useMemo(() => renderWidth(pageWidth, dpr), [pageWidth, dpr]);
+  /**
+   * The bitmap width in device pixels, and the css width that maps onto it
+   * exactly.
+   *
+   * The css width is derived *from* the render width rather than alongside it.
+   * Computing the two independently is how the first version stayed soft: a
+   * page asked for at 1237.6css was rendered 1238 device pixels wide and then
+   * drawn into a box of a slightly different size, and a bitmap that doesn't
+   * land on the pixel grid is resampled rather than blitted. Deriving one from
+   * the other makes disagreeing impossible.
+   */
+  const width = useMemo(() => renderWidth(wantWidth, dpr), [wantWidth, dpr]);
+  const pageWidth = wantWidth > 0 ? width / Math.max(1, dpr) : 0;
+
   // The scrolled stack fills the viewport at minimum, so a page narrower than
   // the window is centred by its own offset and a wider one simply scrolls.
   const stackWidth = Math.max(box.w, pageWidth);
-  const pageLeft = Math.max(0, Math.round((stackWidth - pageWidth) / 2));
+  const pageLeft = Math.max(0, snapToDevice((stackWidth - pageWidth) / 2, dpr));
   const layout = useMemo(
-    () => stackLayout(sizes, pageWidth, PAGE_GAP),
-    [sizes, pageWidth]
+    () => stackLayout(sizes, pageWidth, PAGE_GAP, dpr),
+    [sizes, pageWidth, dpr]
   );
 
   // ---- scrolling ----
@@ -625,7 +654,11 @@ export default function PdfReader({
             </button>
             <button
               onClick={() => setZoom(1)}
-              title="Back to fit"
+              // The tooltip carries the numbers behind the picture. Whether a
+              // page is sharp comes down to the bitmap being exactly as wide as
+              // the box it is drawn into, and that is invisible from the
+              // outside — this is the only way to see it without a debugger.
+              title={`Back to fit — drawn ${Math.round(pageWidth)}css at ${width}px, screen ${dpr}x`}
               className="w-11 rounded px-1 py-1 text-[11px] tabular-nums text-white/60 transition-colors hover:bg-white/10 hover:text-white"
             >
               {Math.round(zoom * 100)}%
@@ -745,8 +778,14 @@ export default function PdfReader({
                       onLoad={() => markLoaded(`${i}@${width}`)}
                       onError={() => markLoaded(`${i}@${width}`)}
                       draggable={false}
+                      // Width only. Forcing the height too means the box and
+                      // the bitmap round separately and disagree by a fraction
+                      // of a pixel, and the browser scales rather than blits.
+                      // Letting the height follow the bitmap's own proportions
+                      // keeps it exactly 1:1.
+                      style={{ width: pageWidth }}
                       className={cx(
-                        "absolute inset-0 h-full w-full select-none bg-white shadow-[0_2px_12px_rgba(0,0,0,.5)] transition-opacity",
+                        "absolute left-0 top-0 h-auto max-w-none select-none bg-white shadow-[0_2px_12px_rgba(0,0,0,.5)] transition-opacity",
                         loaded.has(`${i}@${width}`) ? "opacity-100" : "opacity-0"
                       )}
                     />
@@ -775,7 +814,9 @@ export default function PdfReader({
                 {shown.map((i) => {
                   const size = sizes[i];
                   const height =
-                    size && size.w > 0 ? Math.round(pageWidth * (size.h / size.w)) : 0;
+                    size && size.w > 0
+                      ? snapToDevice(pageWidth * (size.h / size.w), dpr)
+                      : 0;
                   return (
                     <div
                       key={i}
@@ -788,8 +829,11 @@ export default function PdfReader({
                         onLoad={() => markLoaded(`${i}@${width}`)}
                         onError={() => markLoaded(`${i}@${width}`)}
                         draggable={false}
+                        // Width only, so the bitmap keeps its own proportions
+                        // and is blitted rather than scaled.
+                        style={{ width: pageWidth }}
                         className={cx(
-                          "absolute inset-0 h-full w-full select-none bg-white",
+                          "absolute left-0 top-0 h-auto max-w-none select-none bg-white",
                           ready ? "opacity-100" : "opacity-0"
                         )}
                       />
@@ -883,7 +927,7 @@ function TextLayer({ runs, scale }: { runs: TextRun[]; scale: number }) {
     // The layer itself is transparent to the mouse so that clicks landing in
     // the margins still reach the page-turn zones underneath; only the runs
     // themselves take the pointer.
-    <div ref={ref} className="pointer-events-none absolute inset-0 select-text">
+    <div ref={ref} className="pdf-text-layer pointer-events-none absolute inset-0 select-text">
       {runs.map((r, i) => (
         <span
           key={i}

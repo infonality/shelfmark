@@ -43,6 +43,19 @@ export function renderWidth(cssWidth: number, dpr: number): number {
   return Math.min(MAX_RENDER_WIDTH, Math.max(MIN_RENDER_WIDTH, exact));
 }
 
+/**
+ * Round a css length to a whole device pixel.
+ *
+ * Every size and offset a page bitmap depends on goes through this. A bitmap
+ * drawn into a box that is a fraction of a device pixel off — in either
+ * dimension — is resampled rather than blitted, and resampled glyphs look
+ * soft. Exact pixels are the whole game.
+ */
+export function snapToDevice(value: number, dpr: number): number {
+  const scale = Math.max(1, dpr);
+  return Math.round(value * scale) / scale;
+}
+
 export function pageUrl(session: PdfSession, index: number, width: number): string {
   return `${session.resource_base}page/${index}?w=${width}`;
 }
@@ -93,7 +106,12 @@ export interface Stack {
  * page has been rendered — which is why the scrollbar doesn't lurch about as
  * you read.
  */
-export function stackLayout(sizes: PageSize[], width: number, gap = PAGE_GAP): Stack {
+export function stackLayout(
+  sizes: PageSize[],
+  width: number,
+  gap = PAGE_GAP,
+  dpr = 1
+): Stack {
   const tops: number[] = [];
   const heights: number[] = [];
   let y = 0;
@@ -101,7 +119,11 @@ export function stackLayout(sizes: PageSize[], width: number, gap = PAGE_GAP): S
     // A page with a nonsense size still has to occupy something, or every page
     // after it lands at the same offset. A4 is the least surprising guess.
     const ratio = size.w > 0 && size.h > 0 ? size.h / size.w : Math.SQRT2;
-    const h = Math.round(Math.max(1, width) * ratio);
+    // Snapped to a whole device pixel rather than a whole css pixel. Under
+    // display scaling those are not the same thing, and a page that starts
+    // half a device pixel off makes the browser resample its bitmap, which on
+    // text reads as blur.
+    const h = snapToDevice(Math.max(1, width) * ratio, dpr);
     tops.push(y);
     heights.push(h);
     y += h + gap;
