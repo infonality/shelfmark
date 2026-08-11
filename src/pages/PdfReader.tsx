@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Book, ComicLocator, PdfSession, TextRun } from "../api";
+import { Annotation, api, Book, ComicLocator, PdfSession, TextRun } from "../api";
 import {
   buildSpreads,
   PAGE_GAP,
   pageAtOffset,
   pageUrl,
   renderWidth,
+  runPrefixes,
+  runSlices,
   snapToDevice,
   stackLayout,
+  textBetween,
+  textLength,
   visibleRange,
 } from "../pdf-layout";
+import { HIGHLIGHT_COLORS } from "../reader-dom";
 import { cx, Icon, Spinner } from "../ui";
 import { IS_MAC, TRAFFIC_LIGHT_INSET } from "../platform";
 
@@ -96,8 +101,20 @@ export default function PdfReader({
    * on its own and half a minute across a book nobody has scrolled through.
    */
   const [runs, setRuns] = useState<Map<number, TextRun[]>>(() => new Map());
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [menu, setMenu] = useState<PdfMenu>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  /**
+   * The element holding each visible page's runs, so a selection can be asked
+   * which characters of which page it covers. Registered by the text layers
+   * themselves and dropped as pages scroll out.
+   */
+  const runHosts = useRef(new Map<number, HTMLElement>());
+  const registerRuns = useCallback((p: number, el: HTMLElement | null) => {
+    if (el) runHosts.current.set(p, el);
+    else runHosts.current.delete(p);
+  }, []);
   const lastWheel = useRef(0);
   /**
    * Set while the reader is moving the scroll position itself, so the scroll
@@ -376,6 +393,133 @@ export default function PdfReader({
     [sizes, pageWidth]
   );
 
+  // ---- highlights ----
+  const reloadAnnotations = useCallback(() => {
+    api.listAnnotations(book.id).then(setAnnotations).catch(() => {});
+  }, [book.id]);
+  useEffect(reloadAnnotations, [reloadAnnotations]);
+
+  /**
+   * Highlights grouped by the page they sit on. Stored as character ranges in
+   * the page's text, the same way the book reader stores them — the page takes
+   * the place of the spine index — so they survive zoom, a resize, and being
+   * reopened on another machine.
+   */
+  const highlightsByPage = useMemo(() => {
+    const map = new Map<number, PageHighlight[]>();
+    for (const a of annotations) {
+      if (a.kind !== "highlight") continue;
+      const list = map.get(a.spine) ?? [];
+      list.push({ id: a.id, start: a.start_off, end: a.end_off, color: a.color });
+      map.set(a.spine, list);
+    }
+    return map;
+  }, [annotations]);
+
+  const noHighlights = useMemo(() => [] as PageHighlight[], []);
+
+  /**
+   * What the selection covers, page by page, read now rather than later.
+   *
+   * This has to happen while the menu is opening. Pressing the mouse down on
+   * the menu collapses the document selection, so by the time a colour has
+   * been clicked there is nothing left to ask — the highlight silently did
+   * nothing. The book reader's menu already carried its offsets for exactly
+   * this reason; this one learned it the hard way.
+   *
+   * One entry per page: a selection dragged across a page break is one
+   * gesture but two pages of text, and an offset only means anything against
+   * the page it came from.
+   */
+  const captureSelection = useCallback((): SelectedSpan[] => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return [];
+    const range = selection.getRangeAt(0);
+    const out: SelectedSpan[] = [];
+    for (const [p, host] of runHosts.current) {
+      const pageRuns = runs.get(p);
+      if (!pageRuns?.length) continue;
+      const span = selectionOnPage(host, pageRuns, range);
+      if (!span) continue;
+      out.push({
+        page: p,
+        ...span,
+        text: textBetween(pageRuns, runPrefixes(pageRuns), span.start, span.end),
+      });
+    }
+    return out.sort((a, b) => a.page - b.page);
+  }, [runs]);
+
+  const highlight = useCallback(
+    async (spans: SelectedSpan[], color: string) => {
+      if (spans.length === 0) return;
+      try {
+        for (const s of spans) {
+          await api.addAnnotation({
+            bookId: book.id,
+            spine: s.page,
+            startOff: s.start,
+            endOff: s.end,
+            kind: "highlight",
+            color,
+            text: s.text.slice(0, 500),
+          });
+        }
+        window.getSelection()?.removeAllRanges();
+        reloadAnnotations();
+      } catch (e) {
+        alert(String(e));
+      }
+    },
+    [book.id, reloadAnnotations]
+  );
+
+  const removeHighlight = useCallback(
+    async (id: number) => {
+      try {
+        await api.deleteAnnotation(id);
+        reloadAnnotations();
+      } catch (e) {
+        alert(String(e));
+      }
+    },
+    [reloadAnnotations]
+  );
+
+  /**
+   * Our own menu rather than WebView2's reload-and-inspect one, offering the
+   * colours when there is a selection and removal when the click landed on a
+   * highlight already there.
+   */
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const spans = captureSelection();
+      const hasSelection = spans.length > 0;
+
+      let hit: number | null = null;
+      const wrapper = (e.target as HTMLElement).closest?.("[data-page]") as HTMLElement | null;
+      const clicked = wrapper ? Number(wrapper.dataset.page) : NaN;
+      const pageRuns = Number.isFinite(clicked) ? runs.get(clicked) : undefined;
+      const host = Number.isFinite(clicked) ? runHosts.current.get(clicked) : undefined;
+      if (!hasSelection && host && pageRuns?.length) {
+        const offset = offsetAtPoint(host, pageRuns, e.clientX, e.clientY);
+        if (offset !== null) {
+          // Whichever highlight covers the character under the cursor. Asking
+          // the text rather than the rectangles means this keeps working
+          // however the page is scaled.
+          const found = (highlightsByPage.get(clicked) ?? []).find(
+            (h) => offset >= h.start && offset < h.end
+          );
+          hit = found?.id ?? null;
+        }
+      }
+      if (!hasSelection && hit === null) return;
+      setMenu({ x: e.clientX, y: e.clientY, spans, hit });
+    },
+    [runs, highlightsByPage, captureSelection]
+  );
+
   /** Which outline entry the reader is inside: the last one at or before it. */
   const currentOutline = useMemo(() => {
     let best = -1;
@@ -415,7 +559,9 @@ export default function PdfReader({
         e.key === letter || e.key === letter.toUpperCase() || e.code === code;
 
       if (e.key === "Escape") {
-        if (fullscreen) setFull(false);
+        // One layer at a time: the menu, then fullscreen, then the window.
+        if (menu) setMenu(null);
+        else if (fullscreen) setFull(false);
         else onClose?.();
         return;
       }
@@ -481,7 +627,7 @@ export default function PdfReader({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [turn, goTo, count, onClose, fullscreen, setFull, mode, stepZoom]);
+  }, [turn, goTo, count, onClose, fullscreen, setFull, mode, stepZoom, menu]);
 
   /** Paging by wheel, once the page itself has nothing left to scroll. */
   useEffect(() => {
@@ -731,6 +877,8 @@ export default function PdfReader({
         <div
           ref={scrollRef}
           onScroll={mode === "scroll" ? onScroll : undefined}
+          onContextMenu={onContextMenu}
+          onPointerDown={() => setMenu(null)}
           className="h-full w-full overflow-auto"
         >
           {error ? (
@@ -758,6 +906,7 @@ export default function PdfReader({
                 i < first || i > last ? null : (
                   <div
                     key={i}
+                    data-page={i}
                     className="absolute"
                     style={{
                       top: layout.tops[i],
@@ -789,7 +938,13 @@ export default function PdfReader({
                         loaded.has(`${i}@${width}`) ? "opacity-100" : "opacity-0"
                       )}
                     />
-                    <TextLayer runs={runs.get(i) ?? []} scale={scaleFor(i)} />
+                    <TextLayer
+                      page={i}
+                      runs={runs.get(i) ?? []}
+                      scale={scaleFor(i)}
+                      highlights={highlightsByPage.get(i) ?? noHighlights}
+                      register={registerRuns}
+                    />
                   </div>
                 )
               )}
@@ -806,8 +961,17 @@ export default function PdfReader({
                   // `w-max` with a full-width minimum for the same reason the
                   // scrolled stack sets its own width: a zoomed page has to be
                   // able to overflow without losing its left edge.
-                  "flex min-h-full w-max min-w-full items-center justify-center",
-                  fit === "width" && "items-start"
+                  // Centred both ways, whatever the fit. A page smaller than
+                  // the window sits in the middle of it with even margins
+                  // rather than pinned to a corner.
+                  //
+                  // Centring used to be turned off for fit-width, on the
+                  // worry that a page taller than the window would be centred
+                  // into its own overflow and have its top pushed out of
+                  // reach. It can't: `min-h-full` lets the row grow to the
+                  // page, so there is no spare space to centre into and the
+                  // page starts at the top on its own.
+                  "flex min-h-full w-max min-w-full items-center justify-center"
                 )}
                 style={{ gap: pair ? PAGE_GAP : 0 }}
               >
@@ -820,6 +984,7 @@ export default function PdfReader({
                   return (
                     <div
                       key={i}
+                      data-page={i}
                       className="relative shrink-0"
                       style={{ width: pageWidth, height }}
                     >
@@ -837,7 +1002,13 @@ export default function PdfReader({
                           ready ? "opacity-100" : "opacity-0"
                         )}
                       />
-                      <TextLayer runs={runs.get(i) ?? []} scale={scaleFor(i)} />
+                      <TextLayer
+                        page={i}
+                        runs={runs.get(i) ?? []}
+                        scale={scaleFor(i)}
+                        highlights={highlightsByPage.get(i) ?? noHighlights}
+                        register={registerRuns}
+                      />
                     </div>
                   );
                 })}
@@ -863,6 +1034,20 @@ export default function PdfReader({
         )}
         </div>
       </div>
+
+      {menu && (
+        <HighlightMenu
+          menu={menu}
+          onHighlight={highlight}
+          onRemove={removeHighlight}
+          onCopy={() =>
+            navigator.clipboard
+              .writeText(menu.spans.map((s) => s.text).join("\n"))
+              .catch(() => {})
+          }
+          onDismiss={() => setMenu(null)}
+        />
+      )}
 
       {chrome && (
         <footer className="flex shrink-0 items-center gap-3 px-5 pb-2 pt-1.5">
@@ -901,13 +1086,48 @@ export default function PdfReader({
  * and without the correction the highlight drifts further from the glyphs the
  * further along the line you drag.
  */
-function TextLayer({ runs, scale }: { runs: TextRun[]; scale: number }) {
-  const ref = useRef<HTMLDivElement>(null);
+export function TextLayer({
+  page,
+  runs,
+  scale,
+  highlights,
+  register,
+}: {
+  page: number;
+  runs: TextRun[];
+  scale: number;
+  highlights: PageHighlight[];
+  register: (page: number, el: HTMLElement | null) => void;
+}) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const runsRef = useRef<HTMLDivElement>(null);
+  const [marks, setMarks] = useState<Mark[]>([]);
+
+  /**
+   * Registered through the ref itself rather than an effect.
+   *
+   * An effect cannot do this job. Its dependencies would be the page and the
+   * register function, both stable, so it runs exactly once — on the first
+   * render, when the page's text has not arrived yet and this component
+   * returns null before rendering anything. It would register nothing, and
+   * never run again to correct itself once the text landed. React calls a ref
+   * callback when the element actually appears, which is the moment that
+   * matters.
+   */
+  const attachRuns = useCallback(
+    (el: HTMLDivElement | null) => {
+      runsRef.current = el;
+      register(page, el);
+    },
+    [page, register]
+  );
 
   useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const spans = Array.from(el.children) as HTMLElement[];
+    const layer = layerRef.current;
+    const host = runsRef.current;
+    if (!layer || !host) return;
+    const spans = Array.from(host.children) as HTMLElement[];
+
     // Written, read and written again in three passes rather than one pass of
     // three steps. A page carries hundreds of runs, and interleaving a style
     // write with a geometry read forces the browser to re-lay-out the whole
@@ -919,7 +1139,38 @@ function TextLayer({ runs, scale }: { runs: TextRun[]; scale: number }) {
       const got = measured[i];
       if (want > 0 && got > 0) span.style.transform = `scaleX(${want / got})`;
     });
-  }, [runs, scale]);
+
+    // Highlights are measured from the laid-out runs rather than stored as
+    // rectangles, so they follow the text through zoom, a resize, or a
+    // different window entirely. Line boxes come from the range itself, which
+    // is what makes a highlight spanning three lines three rectangles rather
+    // than one block over the paragraph.
+    const origin = layer.getBoundingClientRect();
+    const prefix = runPrefixes(runs);
+    const out: Mark[] = [];
+    for (const hl of highlights) {
+      for (const slice of runSlices(runs, prefix, hl.start, hl.end)) {
+        const node = spans[slice.run]?.firstChild;
+        if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+        const length = node.textContent?.length ?? 0;
+        const range = document.createRange();
+        range.setStart(node, Math.min(slice.from, length));
+        range.setEnd(node, Math.min(slice.to, length));
+        for (const rect of Array.from(range.getClientRects())) {
+          if (rect.width < 0.5 || rect.height < 0.5) continue;
+          out.push({
+            id: hl.id,
+            color: hl.color,
+            x: rect.left - origin.left,
+            y: rect.top - origin.top,
+            w: rect.width,
+            h: rect.height,
+          });
+        }
+      }
+    }
+    setMarks(out);
+  }, [runs, scale, highlights]);
 
   if (scale <= 0 || runs.length === 0) return null;
 
@@ -927,27 +1178,220 @@ function TextLayer({ runs, scale }: { runs: TextRun[]; scale: number }) {
     // The layer itself is transparent to the mouse so that clicks landing in
     // the margins still reach the page-turn zones underneath; only the runs
     // themselves take the pointer.
-    <div ref={ref} className="pdf-text-layer pointer-events-none absolute inset-0 select-text">
-      {runs.map((r, i) => (
-        <span
-          key={i}
-          data-w={r.w * scale}
-          // `select-text` on each run rather than only on the layer: it is the
-          // runs that get selected, and stating it here survives whatever a
-          // future global rule decides about everything else.
-          className="pointer-events-auto absolute cursor-text select-text text-transparent"
-          style={{
-            left: r.x * scale,
-            top: r.y * scale,
-            fontSize: Math.max(1, r.h * scale),
-            lineHeight: 1,
-            whiteSpace: "pre",
-            transformOrigin: "left top",
+    <div
+      ref={layerRef}
+      className="pdf-text-layer pointer-events-none absolute inset-0 select-text"
+    >
+      {/* Under the runs, so a highlight tints the page rather than burying the
+          words, and multiply keeps the printed ink readable through it. */}
+      <div className="absolute inset-0" aria-hidden>
+        {marks.map((m, i) => (
+          <div
+            key={i}
+            className="absolute"
+            style={{
+              left: m.x,
+              top: m.y,
+              width: m.w,
+              height: m.h,
+              background: HIGHLIGHT_COLORS[m.color] ?? HIGHLIGHT_COLORS.yellow,
+              mixBlendMode: "multiply",
+            }}
+          />
+        ))}
+      </div>
+      <div ref={attachRuns} className="absolute inset-0">
+        {runs.map((r, i) => (
+          <span
+            key={i}
+            data-w={r.w * scale}
+            // `select-text` on each run rather than only on the layer: it is the
+            // runs that get selected, and stating it here survives whatever a
+            // future global rule decides about everything else.
+            className="pointer-events-auto absolute cursor-text select-text text-transparent"
+            style={{
+              left: r.x * scale,
+              top: r.y * scale,
+              fontSize: Math.max(1, r.h * scale),
+              lineHeight: 1,
+              whiteSpace: "pre",
+              transformOrigin: "left top",
+            }}
+          >
+            {r.text}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A highlight reduced to what the text layer needs to draw it. */
+interface PageHighlight {
+  id: number;
+  start: number;
+  end: number;
+  color: string;
+}
+
+/** One rectangle of a drawn highlight, relative to the page. */
+interface Mark {
+  id: number;
+  color: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Which character of a page's text a run element and offset correspond to.
+ *
+ * Returns null when the node belongs to some other page, which is how a
+ * selection dragged across a page boundary is recognised.
+ */
+function offsetIn(
+  host: HTMLElement,
+  prefix: number[],
+  node: Node,
+  offset: number
+): number | null {
+  const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
+  if (!el || !host.contains(el)) return null;
+  const index = Array.prototype.indexOf.call(host.children, el);
+  if (index < 0) return null;
+  return (prefix[index] ?? 0) + offset;
+}
+
+/**
+ * The part of one page that the current selection covers.
+ *
+ * A selection can start on one page and end three pages later, so each page is
+ * asked separately what it contributes. An end that falls outside this page
+ * means the selection ran past it, and the page is covered to its edge.
+ */
+export function selectionOnPage(
+  host: HTMLElement,
+  runs: TextRun[],
+  range: Range
+): { start: number; end: number } | null {
+  if (!range.intersectsNode(host)) return null;
+  const prefix = runPrefixes(runs);
+  const total = textLength(runs);
+  const rawStart = offsetIn(host, prefix, range.startContainer, range.startOffset);
+  const rawEnd = offsetIn(host, prefix, range.endContainer, range.endOffset);
+  // Neither end on this page means the page sits in the middle of the
+  // selection and is covered entirely.
+  const start = rawStart ?? 0;
+  const end = rawEnd ?? total;
+  if (end <= start) return null;
+  return { start, end };
+}
+
+/** The character offset under a point, for deciding what was right-clicked. */
+function offsetAtPoint(host: HTMLElement, runs: TextRun[], x: number, y: number): number | null {
+  const doc = host.ownerDocument;
+  // `caretRangeFromPoint` is the WebKit/Blink spelling; this only ever runs in
+  // WebView2, but guard rather than throw if that ever stops being true.
+  const caret = doc.caretRangeFromPoint?.(x, y);
+  if (!caret) return null;
+  return offsetIn(host, runPrefixes(runs), caret.startContainer, caret.startOffset);
+}
+
+/** A page's share of a selection, captured before the menu can collapse it. */
+interface SelectedSpan {
+  page: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+type PdfMenu = {
+  x: number;
+  y: number;
+  /**
+   * What was selected when the menu opened. Captured rather than read on
+   * demand, because opening the menu is what destroys the selection.
+   */
+  spans: SelectedSpan[];
+  /** The highlight under the cursor, when the click landed on one. */
+  hit: number | null;
+} | null;
+
+/**
+ * The right-click menu: colours when something is selected, removal when the
+ * click landed on a highlight.
+ *
+ * It replaces WebView2's own menu, which otherwise offers to reload the page
+ * and open developer tools over a book.
+ */
+function HighlightMenu({
+  menu,
+  onHighlight,
+  onRemove,
+  onCopy,
+  onDismiss,
+}: {
+  menu: NonNullable<PdfMenu>;
+  onHighlight: (spans: SelectedSpan[], color: string) => void;
+  onRemove: (id: number) => void;
+  onCopy: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="fixed z-50 min-w-44 overflow-hidden rounded-lg border border-white/10 bg-slate-900/95 py-1 shadow-2xl backdrop-blur"
+      style={{
+        left: Math.min(menu.x, window.innerWidth - 200),
+        top: Math.min(menu.y, window.innerHeight - 130),
+      }}
+      onContextMenu={(e) => e.preventDefault()}
+      onPointerDown={(e) => e.stopPropagation()}
+      // Stops the press collapsing the selection, so it stays visible behind
+      // the menu. The offsets are already captured either way.
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      {menu.spans.length > 0 && (
+        <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-2">
+          <span className="mr-auto text-[11px] text-slate-500">Highlight</span>
+          {Object.entries(HIGHLIGHT_COLORS).map(([name, css]) => (
+            <button
+              key={name}
+              title={name}
+              onClick={() => {
+                onHighlight(menu.spans, name);
+                onDismiss();
+              }}
+              className="h-5 w-5 rounded-full border border-white/20 transition-transform hover:scale-110"
+              style={{ background: css }}
+            />
+          ))}
+        </div>
+      )}
+      {menu.spans.length > 0 && (
+        <button
+          onClick={() => {
+            onCopy();
+            onDismiss();
           }}
+          className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[13px] text-slate-300 hover:bg-white/10 hover:text-white"
         >
-          {r.text}
-        </span>
-      ))}
+          <Icon name="check" className="h-3.5 w-3.5 opacity-60" />
+          Copy
+        </button>
+      )}
+      {menu.hit !== null && (
+        <button
+          onClick={() => {
+            onRemove(menu.hit as number);
+            onDismiss();
+          }}
+          className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[13px] text-slate-300 hover:bg-white/10 hover:text-white"
+        >
+          <Icon name="trash" className="h-3.5 w-3.5 opacity-60" />
+          Remove highlight
+        </button>
+      )}
     </div>
   );
 }

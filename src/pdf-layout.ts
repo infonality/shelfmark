@@ -10,7 +10,7 @@
  * five-hundred-page book have a truthful scrollbar from the moment it opens.
  */
 
-import { PageSize, PdfSession } from "./api";
+import { PageSize, PdfSession, TextRun } from "./api";
 
 /** Gap between pages when scrolling, in CSS pixels. */
 export const PAGE_GAP = 16;
@@ -165,4 +165,86 @@ export function visibleRange(
   let last = first;
   while (last + 1 < tops.length && tops[last + 1] < limit) last += 1;
   return [first, last];
+}
+
+/**
+ * Anchoring a highlight to a place in a PDF.
+ *
+ * A highlight has to survive being closed, reopened, zoomed and re-rendered,
+ * so it cannot be stored as rectangles — those are a property of how wide the
+ * page happened to be drawn that day. It is stored instead as a character
+ * range in the page's text, exactly as the book reader stores one: the page
+ * takes the place of the spine index, and the offsets index the page's runs
+ * joined end to end.
+ *
+ * That leaves one job for the reader: turning a character range back into
+ * rectangles at whatever size the page is now.
+ */
+
+/** Where each run starts in the page's text, and how long the text is. */
+export function runPrefixes(runs: TextRun[]): number[] {
+  const out: number[] = [];
+  let n = 0;
+  for (const run of runs) {
+    out.push(n);
+    n += run.text.length;
+  }
+  return out;
+}
+
+export function textLength(runs: TextRun[]): number {
+  let n = 0;
+  for (const run of runs) n += run.text.length;
+  return n;
+}
+
+/** The piece of one run that a character range covers. */
+export interface RunSlice {
+  /** Index into `runs`. */
+  run: number;
+  /** Character range within that run's own text. */
+  from: number;
+  to: number;
+}
+
+/**
+ * Which runs a character range touches, and how much of each.
+ *
+ * Ranges are half-open, so a highlight ending exactly where a run begins does
+ * not reach into it — otherwise every highlight would bleed one run further
+ * than the reader dragged.
+ */
+export function runSlices(
+  runs: TextRun[],
+  prefix: number[],
+  start: number,
+  end: number
+): RunSlice[] {
+  const lo = Math.min(start, end);
+  const hi = Math.max(start, end);
+  const out: RunSlice[] = [];
+  if (hi <= lo) return out;
+  for (let i = 0; i < runs.length; i++) {
+    const runStart = prefix[i] ?? 0;
+    const runEnd = runStart + runs[i].text.length;
+    if (runEnd <= lo || runStart >= hi) continue;
+    out.push({
+      run: i,
+      from: Math.max(0, lo - runStart),
+      to: Math.min(runs[i].text.length, hi - runStart),
+    });
+  }
+  return out;
+}
+
+/** The text a character range covers, for storing alongside the highlight. */
+export function textBetween(
+  runs: TextRun[],
+  prefix: number[],
+  start: number,
+  end: number
+): string {
+  return runSlices(runs, prefix, start, end)
+    .map((s) => runs[s.run].text.slice(s.from, s.to))
+    .join("");
 }

@@ -2,7 +2,7 @@
   "name": "shelfmark",
   "private": true,
   "license": "MIT",
-  "version": "0.5.12",
+  "version": "0.5.16",
   "type": "module",
   "scripts": {
     "dev": "vite",
