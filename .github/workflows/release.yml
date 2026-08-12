@@ -76,12 +76,20 @@ jobs:
             libfuse2 \
             file
 
-      # PDFium powers PDF first-page cover rendering. Fetch the platform's
+      # PDFium renders PDF pages and first-page covers. Fetch the platform's
       # prebuilt library so it gets bundled as an app resource.
+      #
+      # Retried, and failing loudly. Without `--retry` a single hiccup on one
+      # platform loses the whole release — which it has done, twice in one
+      # afternoon. Without `--fail` an error page is written to the archive
+      # instead, and the build dies further along at `tar` complaining about a
+      # corrupt file, which says nothing about what went wrong.
       - name: Fetch PDFium
         shell: bash
         run: |
-          curl -sL -o pdfium.tgz \
+          curl --location --silent --show-error --fail \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -o pdfium.tgz \
             "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/${{ matrix.pdfium_asset }}"
           tar -xzf pdfium.tgz "${{ matrix.pdfium_member }}"
           cp "${{ matrix.pdfium_member }}" "${{ matrix.pdfium_dest }}"
