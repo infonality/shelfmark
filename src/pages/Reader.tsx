@@ -34,7 +34,7 @@ import {
   settle,
   showPage,
 } from "../reader-layout";
-import { cx, Icon, Spinner } from "../ui";
+import { Clock, cx, Icon, Spinner } from "../ui";
 import { IS_MAC, TRAFFIC_LIGHT_INSET } from "../platform";
 import {
   DEFAULT_PREFS,
@@ -766,6 +766,7 @@ export default function Reader({
         <div className="w-12 shrink-0 text-right text-[11px] tabular-nums text-white/40">
           {Math.round(percent * 100)}%
         </div>
+        <Clock className="ml-1 border-l border-white/10 pl-3" />
       </header>
       )}
 

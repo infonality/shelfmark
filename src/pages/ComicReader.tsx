@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Book, ComicLocator, ComicSession, ReadingDirection } from "../api";
-import { cx, Icon, Spinner } from "../ui";
+import { Annotation, api, Book, ComicLocator, ComicSession, ReadingDirection } from "../api";
+import { Clock, cx, Icon, Spinner } from "../ui";
 import { IS_MAC, TRAFFIC_LIGHT_INSET } from "../platform";
 
 /**
@@ -110,6 +110,8 @@ export default function ComicReader({
   const [fullscreen, setFullscreen] = useState(false);
   const [chrome, setChrome] = useState(true);
   const [loadedPages, setLoadedPages] = useState<Set<number>>(() => new Set());
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [marksOpen, setMarksOpen] = useState(false);
   const rtl = direction === "rtl";
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -208,6 +210,53 @@ export default function ComicReader({
     }
   }, [session, shown, twoUp, noteSize, markLoaded]);
 
+  // ---- bookmarks ----
+  //
+  // A comic has no text, so there is nothing to anchor to inside a page — the
+  // page *is* the anchor. That fits the book reader's table without changing
+  // it: the spine index carries the page, and the character offsets it also
+  // stores simply have nothing to say here.
+  const reloadAnnotations = useCallback(() => {
+    api.listAnnotations(book.id).then(setAnnotations).catch(() => {});
+  }, [book.id]);
+  useEffect(reloadAnnotations, [reloadAnnotations]);
+
+  const bookmarks = useMemo(() => {
+    const pages = annotations
+      .filter((a) => a.kind === "bookmark")
+      .map((a) => ({ id: a.id, page: a.spine }));
+    return pages.sort((a, b) => a.page - b.page);
+  }, [annotations]);
+
+  const markHere = useMemo(
+    () => bookmarks.find((b) => b.page === page) ?? null,
+    [bookmarks, page]
+  );
+
+  /** Bookmark this page, or drop the bookmark that is already on it. */
+  const toggleBookmark = useCallback(async () => {
+    try {
+      if (markHere) {
+        await api.deleteAnnotation(markHere.id);
+      } else {
+        await api.addAnnotation({
+          bookId: book.id,
+          spine: page,
+          // Offsets anchor a passage within a chapter's text. A page has no
+          // text and no inside, so there is nothing for them to point at.
+          startOff: 0,
+          endOff: 0,
+          kind: "bookmark",
+          color: "yellow",
+          text: `Page ${page + 1}`,
+        });
+      }
+      reloadAnnotations();
+    } catch (e) {
+      alert(String(e));
+    }
+  }, [markHere, book.id, page, reloadAnnotations]);
+
   // ---- navigation ----
   const turn = useCallback(
     (dir: 1 | -1) => {
@@ -259,9 +308,11 @@ export default function ComicReader({
       if (el?.tagName === "INPUT" || el?.tagName === "TEXTAREA") return;
       switch (e.key) {
         case "Escape":
-          // Escape backs out one layer at a time: fullscreen first, then the
-          // window. Closing the reader outright from fullscreen is too big a jump.
-          if (fullscreen) setFull(false);
+          // Escape backs out one layer at a time: the bookmark list, then
+          // fullscreen, then the window. Closing the reader outright from
+          // fullscreen is too big a jump.
+          if (marksOpen) setMarksOpen(false);
+          else if (fullscreen) setFull(false);
           else onClose?.();
           break;
         case "f":
@@ -273,6 +324,11 @@ export default function ComicReader({
         case "I":
           e.preventDefault();
           setChrome((c) => !c);
+          break;
+        case "b":
+        case "B":
+          e.preventDefault();
+          toggleBookmark();
           break;
         case "ArrowRight":
           e.preventDefault();
@@ -304,7 +360,7 @@ export default function ComicReader({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [turn, goTo, count, onClose, rtl, fullscreen, setFull]);
+  }, [turn, goTo, count, onClose, rtl, fullscreen, setFull, toggleBookmark, marksOpen]);
 
   /**
    * Wheel behaviour depends on the fit. With the whole page visible there is
@@ -370,7 +426,10 @@ export default function ComicReader({
         : "overflow-auto";
 
   return (
-    <div className="relative flex h-full flex-col bg-[#0e0e11] text-slate-200">
+    <div
+      className="relative flex h-full flex-col bg-[#0e0e11] text-slate-200"
+      onPointerDown={() => setMarksOpen(false)}
+    >
       {/* Chrome */}
       {chrome && (
         <header
@@ -450,6 +509,66 @@ export default function ComicReader({
             {rtl ? "R → L" : "L → R"}
           </button>
 
+          <div className="relative shrink-0" onPointerDown={(e) => e.stopPropagation()}>
+            <button
+              onClick={toggleBookmark}
+              disabled={count === 0}
+              title={markHere ? "Remove bookmark (B)" : "Bookmark this page (B)"}
+              aria-pressed={!!markHere}
+              className={cx(
+                "rounded-md p-2 transition-colors disabled:opacity-25",
+                markHere
+                  ? "bg-white/15 text-accent-300"
+                  : "text-white/50 hover:bg-white/10 hover:text-white"
+              )}
+            >
+              <Icon name="bookmark" className="h-4 w-4" />
+            </button>
+            {bookmarks.length > 0 && (
+              <button
+                onClick={() => setMarksOpen((v) => !v)}
+                title={`${bookmarks.length} bookmark${bookmarks.length === 1 ? "" : "s"}`}
+                className={cx(
+                  "ml-0.5 rounded-md px-1.5 py-2 text-[11px] tabular-nums transition-colors",
+                  marksOpen
+                    ? "bg-white/15 text-white"
+                    : "text-white/40 hover:bg-white/10 hover:text-white"
+                )}
+              >
+                {bookmarks.length}
+              </button>
+            )}
+            {marksOpen && bookmarks.length > 0 && (
+              <div className="absolute right-0 top-full z-40 mt-1 max-h-80 w-44 overflow-y-auto rounded-lg border border-white/10 bg-slate-900/95 py-1 shadow-2xl backdrop-blur">
+                {bookmarks.map((b) => (
+                  <div key={b.id} className="group flex items-center">
+                    <button
+                      onClick={() => {
+                        goTo(b.page);
+                        setMarksOpen(false);
+                      }}
+                      className={cx(
+                        "flex-1 px-3 py-1.5 text-left text-[13px] transition-colors hover:bg-white/10",
+                        b.page === page ? "text-accent-300" : "text-slate-300"
+                      )}
+                    >
+                      Page {b.page + 1}
+                    </button>
+                    <button
+                      onClick={() =>
+                        api.deleteAnnotation(b.id).then(reloadAnnotations).catch(() => {})
+                      }
+                      title="Remove"
+                      className="mr-1 rounded p-1 text-white/20 opacity-0 transition-opacity hover:bg-white/10 hover:text-white group-hover:opacity-100"
+                    >
+                      <Icon name="trash" className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => setFull(!fullscreen)}
             title={
@@ -471,6 +590,8 @@ export default function ComicReader({
               <Icon name="open" className="h-4 w-4" />
             </button>
           )}
+
+          <Clock className="ml-1 border-l border-white/10 pl-3" />
         </header>
       )}
 
@@ -550,17 +671,34 @@ export default function ComicReader({
       {/* Footer: a scrubber, because two hundred pages is a long way by arrow key. */}
       {chrome && (
         <footer className="flex shrink-0 items-center gap-3 px-5 pb-2 pt-1.5">
-          <input
-            type="range"
-            min={0}
-            max={Math.max(0, count - 1)}
-            value={page}
-            onChange={(e) => goTo(Number(e.target.value))}
-            disabled={count === 0}
-            aria-label="Jump to page"
-            style={{ direction: rtl ? "rtl" : "ltr" }}
-            className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-white/15 accent-accent-500"
-          />
+          {/* The scrubber, with a tick per bookmark so they are visible from
+              anywhere in the issue rather than only from the list. */}
+          <div className="relative flex-1">
+            <input
+              type="range"
+              min={0}
+              max={Math.max(0, count - 1)}
+              value={page}
+              onChange={(e) => goTo(Number(e.target.value))}
+              disabled={count === 0}
+              aria-label="Jump to page"
+              style={{ direction: rtl ? "rtl" : "ltr" }}
+              className="h-1 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-accent-500"
+            />
+            {count > 1 &&
+              bookmarks.map((b) => {
+                // Ticks follow the scrubber, and the scrubber runs the other
+                // way for manga.
+                const along = (b.page / (count - 1)) * 100;
+                return (
+                  <span
+                    key={b.id}
+                    className="pointer-events-none absolute top-1/2 h-2 w-0.5 -translate-y-1/2 rounded-full bg-accent-400"
+                    style={{ left: `${rtl ? 100 - along : along}%` }}
+                  />
+                );
+              })}
+          </div>
           <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-white/35">
             {count > 0 ? `${Math.round(percent * 100)}%` : ""}
           </span>

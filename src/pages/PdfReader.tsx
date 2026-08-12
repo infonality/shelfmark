@@ -16,7 +16,7 @@ import {
   visibleRange,
 } from "../pdf-layout";
 import { HIGHLIGHT_COLORS } from "../reader-dom";
-import { cx, Icon, Spinner } from "../ui";
+import { Clock, cx, Icon, Spinner } from "../ui";
 import { IS_MAC, TRAFFIC_LIGHT_INSET } from "../platform";
 
 /**
@@ -930,6 +930,8 @@ export default function PdfReader({
               <Icon name="open" className="h-4 w-4" />
             </button>
           )}
+
+          <Clock className="ml-1 border-l border-white/10 pl-3" />
         </header>
       )}
 

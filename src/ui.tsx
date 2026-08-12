@@ -1,5 +1,5 @@
 // Shared UI primitives: class helper, icon set, buttons, spinner, rating.
-import React from "react";
+import React, { useEffect, useState } from "react";
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ");
@@ -307,4 +307,44 @@ export function statusMeta(status: string): { label: string; tone: "slate" | "ac
     default:
       return { label: "Unread", tone: "slate" };
   }
+}
+
+/**
+ * The time, for a reader's chrome.
+ *
+ * Reading fullscreen hides the taskbar, and the usual reason to leave a book is
+ * that it has got late. Having it here means not breaking out of the page to
+ * find out.
+ *
+ * It ticks on the minute rather than every minute from whenever the reader
+ * opened: a timer started at some arbitrary moment sits up to fifty-nine
+ * seconds behind the clock it is meant to be reporting.
+ */
+export function Clock({ className }: { className?: string }) {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const tick = () => setNow(new Date());
+    const start = setTimeout(() => {
+      tick();
+      interval = setInterval(tick, 60_000);
+    }, 60_000 - (Date.now() % 60_000));
+    return () => {
+      clearTimeout(start);
+      if (interval) clearInterval(interval);
+    };
+  }, []);
+
+  return (
+    <div
+      className={cx("shrink-0 text-[12px] tabular-nums text-white/50", className)}
+      // The full date and time on hover, for the once in a while it is wanted.
+      title={now.toLocaleString()}
+    >
+      {/* The reader's locale decides the shape: a 24-hour clock is not
+          universal, and guessing wrong is worse than asking. */}
+      {now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+    </div>
+  );
 }
