@@ -53,11 +53,28 @@ import {
  * spread with a spine gutter on wide windows, and chrome that stays out of
  * the way until you reach for it.
  *
- * Chapter markup renders inside an iframe sandboxed *without* `allow-scripts`,
- * so nothing in the book can execute — an EPUB is untrusted HTML from wherever
- * the file came from. `allow-same-origin` is what lets this component reach in
- * to lay out columns and measure pages; granting script permission alongside it
- * would undo the protection entirely, so don't.
+ * Chapter markup is untrusted HTML from wherever the file came from, so it
+ * renders inside a sandboxed iframe. `allow-same-origin` is what lets this
+ * component reach in to lay out columns and measure pages.
+ *
+ * SECURITY — read before touching the `sandbox` attribute. The sandbox lists
+ * `allow-scripts`, which on its own alongside `allow-same-origin` would be a
+ * hole big enough to hand a book `window.__TAURI__`. It is safe only because
+ * three separate things stop a script running, none of which is the sandbox:
+ * `reader.rs` strips `<script>`, `on*=` handlers and `javascript:` URLs before
+ * the markup ever arrives; the chapter document carries `script-src 'none'` in
+ * its own CSP (see `CHAPTER_CSP`); and a `srcdoc` frame inherits the app's CSP,
+ * which is `script-src 'self'`. Remove any of those and this becomes unsafe.
+ *
+ * The flag has to be there because WebKit dispatches no DOM events at all into
+ * a frame whose scripting is disabled — not wheel, not keydown, not click, not
+ * contextmenu. Every listener below is installed by *this* window on the
+ * chapter's document, and on macOS all of them were silently dead: pages would
+ * not turn, links did nothing, the highlight menu never opened, and `settle`
+ * waited out its full timeout on every chapter because image `load` never
+ * fired. Blink dispatches them regardless, which is why Windows looked fine.
+ * The sandbox keeps every other restriction — no forms, no popups, and no
+ * navigating the app window out from under itself.
  *
  * Laying out and measuring lives in `reader-layout`; this file is the state
  * around it. Two rules keep that state honest:
@@ -936,8 +953,10 @@ export default function Reader({
                 <iframe
                   ref={frameRef}
                   title={book.title}
-                  // No `allow-scripts`: nothing in the book may execute.
-                  sandbox="allow-same-origin"
+                  // `allow-scripts` does NOT mean the book may execute: scripts
+                  // are blocked three ways over. See the security note above —
+                  // without the flag, WebKit delivers no events in here at all.
+                  sandbox="allow-same-origin allow-scripts"
                   className="h-full w-full border-0"
                 />
                 {/* Spine between the two pages of a spread. */}

@@ -339,6 +339,38 @@ export function unprefixForeignMarkup(html: string): string {
 }
 
 /**
+ * Where the book's own files come from. Tauri maps a custom scheme onto an http
+ * origin on Windows and serves it as a real scheme elsewhere, so both spellings
+ * have to be allowed — see `resource_base` in `src-tauri/src/commands.rs`.
+ */
+const RESOURCE_SOURCES = "bookres: http://bookres.localhost";
+
+/**
+ * The policy the chapter document is rendered under.
+ *
+ * `script-src 'none'` is the load-bearing line: it, and not the frame's sandbox,
+ * is what stops an EPUB executing anything. See the security note in
+ * `pages/Reader.tsx` for why the job moved here. Everything else is the shortest
+ * list that still lets a book look like itself — its stylesheets, its embedded
+ * fonts, its images — and nothing may be fetched from the network.
+ *
+ * `base-uri` is not `'none'`: this document is given a `<base>` of its own
+ * below, and the chapter's relative URLs are worthless without it.
+ */
+const CHAPTER_CSP = [
+  "default-src 'none'",
+  `img-src ${RESOURCE_SOURCES} data: blob:`,
+  `style-src ${RESOURCE_SOURCES} 'unsafe-inline'`,
+  `font-src ${RESOURCE_SOURCES} data:`,
+  `media-src ${RESOURCE_SOURCES} data: blob:`,
+  `base-uri ${RESOURCE_SOURCES}`,
+  "script-src 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+].join("; ");
+
+/**
  * Wrap chapter markup for the frame. A `<base>` pointed at the chapter's folder
  * inside the archive makes every relative URL the publisher wrote — images,
  * stylesheets, `@font-face` sources — resolve through the resource protocol
@@ -352,9 +384,17 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const base = `${resourceBase}${chapter.dir ? `${chapter.dir}/` : ""}`;
   const doc = new DOMParser().parseFromString(unprefixForeignMarkup(chapter.html), "text/html");
 
+  // First in the head, before anything that could fetch or run. A book may
+  // carry a policy of its own; a second one can only narrow this, never widen
+  // it, so arriving first is all the precedence needed.
+  const csp = doc.createElement("meta");
+  csp.setAttribute("http-equiv", "Content-Security-Policy");
+  csp.setAttribute("content", CHAPTER_CSP);
+  doc.head.insertBefore(csp, doc.head.firstChild);
+
   const baseEl = doc.createElement("base");
   baseEl.setAttribute("href", base);
-  doc.head.insertBefore(baseEl, doc.head.firstChild);
+  doc.head.insertBefore(baseEl, csp.nextSibling);
 
   // Defaults the publisher's own stylesheet can still override, since these
   // come first in the cascade.
