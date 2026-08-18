@@ -94,11 +94,28 @@ export function countPages(scrollWidth: number, w: number): number {
  */
 export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs) {
   // The page width is applied by scrolling, not by sizing anything, so `g.w`
-  // is deliberately absent from the rules below.
-  const { h, cols, pad } = g;
+  // appears below only as a column width, never as a page width.
+  const { w, h, cols, pad } = g;
   const t = THEMES[prefs.theme];
   const gap = pad * 2;
   const bottom = pad * 0.75;
+  // The column width, stated rather than left to `column-count` to work out.
+  //
+  // Both spellings ask for the same layout and every engine computes the same
+  // used width from either — but only a non-auto `column-width` is guaranteed
+  // to produce a multi-column flow at all. WebKit decides that in
+  // `RenderBlockFlow::willCreateColumns`, and the branch that accepts a plain
+  // `column-count` is `#if PLATFORM(COCOA)`-guarded and skips a count of one.
+  // On macOS a single-column chapter therefore never fragmented: the whole
+  // thing became one tall column, clipped by the window, counted as one page,
+  // and a page turn ran off the end into the next chapter. Two columns were
+  // fine, so it only showed up in a window too narrow for a spread.
+  //
+  // Half a pixel comes off so that rounding can only ever land the count on
+  // the value below the one asked for, never above it; `column-count` stays as
+  // the ceiling. The used width the engine computes back is unchanged, so the
+  // page pitch identity at the top of this file still holds exactly.
+  const column = Math.max(1, (w - pad * 2 - (cols - 1) * gap) / cols - 0.5);
   // The tallest a figure can be and still fit the page it starts on.
   const contentH = Math.max(80, h - pad - bottom);
 
@@ -135,10 +152,11 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
       width:auto !important; min-width:0 !important; max-width:none !important;
       height:${h}px !important; min-height:0 !important; max-height:none !important;
       box-sizing:border-box !important;
-      column-width:auto !important;
+      column-width:${column}px !important;
       column-count:${cols} !important;
       column-gap:${gap}px !important;
       column-fill:auto !important;
+      -webkit-column-width:${column}px !important;
       -webkit-column-count:${cols} !important;
       -webkit-column-gap:${gap}px !important;
       overflow:visible !important;
