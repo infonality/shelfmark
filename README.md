@@ -233,4 +233,4 @@ cd src-tauri && cargo test
 
 ## License
 
-[MIT](LICENSE) © Kas
+[MIT](LICENSE) © Carson
