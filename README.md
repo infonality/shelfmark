@@ -19,6 +19,35 @@ covers. There's no account, no sync, and no telemetry.
 
 ---
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" align="center"><b>Library</b> — grid view with covers</td>
+    <td width="50%" align="center"><b>Reader</b> — paginated two-page spread</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screens/grid_view.PNG" alt="Library grid view"></td>
+    <td><img src="docs/screens/reader.PNG" alt="EPUB reader with two-page spread"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Comics</b> — series grouped on the shelf</td>
+    <td align="center"><b>Dashboard</b> — reading at a glance</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screens/comics.PNG" alt="Comics shelf with series grouping"></td>
+    <td><img src="docs/screens/dashboard.PNG" alt="Dashboard with reading stats"></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>Book details</b> — metadata, progress, rating, Open Library lookup</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screens/metadata_editor.PNG" alt="Book details panel"></td>
+  </tr>
+</table>
+
+---
+
 ## Features
 
 **Scans your folders, understands the files**
