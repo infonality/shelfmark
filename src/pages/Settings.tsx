@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, pickFolder, Settings } from "../api";
 import { ACCENTS, Appearance, AppTheme } from "../appearance";
 import { Button, Icon, cx } from "../ui";
@@ -16,15 +16,44 @@ export default function SettingsPage({
 }) {
   const [booksRoot, setBooksRoot] = useState("");
   const [comicsRoot, setComicsRoot] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "pending" | "saving" | "saved">("idle");
+  const hydrated = useRef(false);
 
   useEffect(() => {
-    if (settings) {
+    if (settings && !hydrated.current) {
+      hydrated.current = true;
       setBooksRoot(settings.books_root ?? "");
       setComicsRoot(settings.comics_root ?? "");
     }
   }, [settings]);
+
+  // Paths save after a short pause. Folder-picker changes use the same path,
+  // so typing and browsing cannot diverge into two persistence behaviours.
+  useEffect(() => {
+    if (!settings) return;
+    const next: Settings = {
+      books_root: booksRoot.trim(),
+      comics_root: comicsRoot.trim(),
+      words_per_page: settings.words_per_page || 275,
+    };
+    if (next.books_root === settings.books_root && next.comics_root === settings.comics_root) {
+      return;
+    }
+    setSaveState("pending");
+    const timer = window.setTimeout(async () => {
+      setSaveState("saving");
+      try {
+        await api.saveSettings(next);
+        await onSaved();
+        setSaveState("saved");
+        window.setTimeout(() => setSaveState("idle"), 2000);
+      } catch (e) {
+        setSaveState("idle");
+        alert(String(e));
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [booksRoot, comicsRoot, settings, onSaved]);
 
   async function browse() {
     const dir = await pickFolder("Choose your books folder");
@@ -34,27 +63,6 @@ export default function SettingsPage({
   async function browseComics() {
     const dir = await pickFolder("Choose your comics folder");
     if (dir) setComicsRoot(dir);
-  }
-
-  async function save() {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await api.saveSettings({
-        books_root: booksRoot.trim(),
-        comics_root: comicsRoot.trim(),
-        // Still stored: it's what turns an EPUB's word count into a page
-        // estimate, since EPUBs have no pages of their own.
-        words_per_page: settings?.words_per_page || 275,
-      });
-      await onSaved();
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setSaving(false);
-    }
   }
 
   return (
@@ -105,16 +113,16 @@ export default function SettingsPage({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 pt-1">
-          <Button
-            variant="primary"
-            busy={saving}
-            onClick={save}
-            disabled={!booksRoot.trim() && !comicsRoot.trim()}
-          >
-            {!saving && <Icon name="check" className="h-4 w-4" />} Save
-          </Button>
-          {saved && <span className="text-sm text-emerald-400">Saved</span>}
+        <div className="flex items-center gap-2 pt-1 text-xs text-slate-500" aria-live="polite">
+          {saveState === "saving" ? (
+            <>Saving…</>
+          ) : saveState === "pending" ? (
+            <>Changes save automatically</>
+          ) : saveState === "saved" ? (
+            <><Icon name="check" className="h-3.5 w-3.5 text-emerald-400" /> Saved</>
+          ) : (
+            <>Changes save automatically</>
+          )}
         </div>
       </section>
 

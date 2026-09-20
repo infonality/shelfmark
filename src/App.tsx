@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./index.css";
-import { api, Book, ProgressEvent, Settings } from "./api";
+import { api, Book, Kind, pickLibraryFiles, ProgressEvent, Settings } from "./api";
 import { Appearance, applyAppearance, loadAppearance, saveAppearance } from "./appearance";
 import { Button, cx, Icon, Logo, Spinner } from "./ui";
 import { TITLE_BAR_HEIGHT } from "./platform";
@@ -24,6 +25,10 @@ export default function App() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [scanning, setScanning] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [tags, setTags] = useState<string[]>([]);
+  const [collection, setCollection] = useState<string | null>(null);
   // main.tsx has already applied this before the first paint; holding it in
   // state is what lets the Settings controls re-render against it.
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
@@ -60,6 +65,16 @@ export default function App() {
       if (!s.books_root) setView("settings");
     });
   }, [loadSettings]);
+
+  useEffect(() => {
+    api.listTags().then(setTags).catch(() => {});
+  }, [reloadToken]);
+
+  useEffect(() => {
+    if (collection && !tags.some((tag) => tag.toLowerCase() === collection.toLowerCase())) {
+      setCollection(null);
+    }
+  }, [tags, collection]);
 
   // Global progress listener for the scan job.
   useEffect(() => {
@@ -98,6 +113,57 @@ export default function App() {
     }
   }, [reload]);
 
+  const importFiles = useCallback(
+    async (paths: string[], kind: Kind) => {
+      if (!paths.length) return;
+      setImporting(true);
+      try {
+        const result = await api.importFiles(paths, kind);
+        if (result.copied === 0 && result.scan.added === 0 && result.skipped > 0) {
+          alert("No new supported files were copied. Existing or unsupported files were skipped.");
+        }
+        setView(kind === "comic" ? "comics" : "library");
+        if (kind === "book") setCollection(null);
+        reload();
+      } catch (e) {
+        alert(String(e));
+      } finally {
+        setImporting(false);
+      }
+    },
+    [reload]
+  );
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") setDragActive(true);
+        if (payload.type === "leave") setDragActive(false);
+        if (payload.type === "drop") {
+          setDragActive(false);
+          const kind: Kind = view === "comics" ? "comic" : "book";
+          void importFiles(payload.paths, kind);
+        }
+      })
+      .then((fn) => (unlisten = fn));
+    return () => unlisten?.();
+  }, [importFiles, view]);
+
+  const saveSettings = useCallback(async () => {
+    await loadSettings();
+    reload();
+  }, [loadSettings, reload]);
+
+  const importKind: Kind = view === "comics" ? "comic" : "book";
+  const importConfigured = importKind === "comic" ? !!settings?.comics_root : !!settings?.books_root;
+
+  const chooseImport = useCallback(async () => {
+    const paths = await pickLibraryFiles(importKind);
+    await importFiles(paths, importKind);
+  }, [importFiles, importKind]);
+
   return (
     <div className="flex h-full w-full text-slate-200">
       {/* Sidebar */}
@@ -122,25 +188,61 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1 px-3 py-2">
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-2">
           {NAV.map((n) => (
-            <button
-              key={n.id}
-              onClick={() => setView(n.id)}
-              className={cx(
-                "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-                view === n.id
-                  ? "bg-accent-600/20 text-white ring-1 ring-inset ring-accent-500/30"
-                  : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+            <div key={n.id}>
+              <button
+                onClick={() => {
+                  setView(n.id);
+                  if (n.id === "library") setCollection(null);
+                }}
+                className={cx(
+                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                  view === n.id && (n.id !== "library" || !collection)
+                    ? "bg-accent-600/20 text-white ring-1 ring-inset ring-accent-500/30"
+                    : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                )}
+              >
+                <Icon name={n.icon} className="h-[18px] w-[18px]" />
+                {n.label}
+              </button>
+              {n.id === "library" && tags.length > 0 && (
+                <div className="mb-1 ml-6 mt-1 space-y-0.5 border-l border-white/10 pl-2">
+                  {tags.map((tag) => (
+                    <button
+                      key={tag.toLowerCase()}
+                      onClick={() => {
+                        setCollection(tag);
+                        setView("library");
+                      }}
+                      title={tag}
+                      className={cx(
+                        "block w-full truncate rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                        view === "library" && collection?.toLowerCase() === tag.toLowerCase()
+                          ? "bg-accent-500/15 text-accent-300"
+                          : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                      )}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
               )}
-            >
-              <Icon name={n.icon} className="h-[18px] w-[18px]" />
-              {n.label}
-            </button>
+            </div>
           ))}
         </nav>
 
         <div className="px-3 pb-4">
+          <Button
+            variant="subtle"
+            className="mb-2 w-full justify-center"
+            busy={importing}
+            onClick={chooseImport}
+            disabled={!importConfigured}
+          >
+            {!importing && <Icon name="plus" className="h-4 w-4" />}
+            {importing ? "Importing…" : `Import ${importKind === "comic" ? "Comics" : "Books"}`}
+          </Button>
           <Button
             variant="primary"
             className="w-full justify-center"
@@ -178,7 +280,7 @@ export default function App() {
             />
           )}
           {view === "library" && (
-            <Library reloadToken={reloadToken} onReload={reload} onOpen={openBook} kind="book" />
+            <Library reloadToken={reloadToken} onReload={reload} onOpen={openBook} kind="book" tag={collection} />
           )}
           {view === "comics" && (
             <Library reloadToken={reloadToken} onReload={reload} onOpen={openBook} kind="comic" />
@@ -188,10 +290,7 @@ export default function App() {
               settings={settings}
               appearance={appearance}
               onAppearance={changeAppearance}
-              onSaved={async () => {
-                await loadSettings();
-                reload();
-              }}
+              onSaved={saveSettings}
             />
           )}
         </div>
@@ -201,6 +300,16 @@ export default function App() {
       <div className="pointer-events-none fixed bottom-5 right-5 z-50 flex w-80 flex-col gap-3">
         {progress && <ProgressToast p={progress} />}
       </div>
+
+      {dragActive && (
+        <div className="pointer-events-none fixed inset-0 z-[100] grid place-items-center bg-slate-950/75 backdrop-blur-sm">
+          <div className="rounded-2xl border-2 border-dashed border-accent-400 bg-slate-900/90 px-12 py-10 text-center shadow-2xl">
+            <Icon name="plus" className="mx-auto h-8 w-8 text-accent-300" />
+            <div className="mt-3 text-lg font-semibold">Drop to import {importKind === "comic" ? "comics" : "books"}</div>
+            <div className="mt-1 text-sm text-slate-400">Files will be copied into the current library folder.</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

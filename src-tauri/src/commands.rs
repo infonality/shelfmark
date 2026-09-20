@@ -9,10 +9,10 @@ use tauri::{AppHandle, Emitter, State};
 use crate::db;
 use crate::error::CmdResult;
 use crate::models::{
-    Annotation, Book, BookEdit, DashboardStats, MetaCandidate, ScanResult, Settings,
+    Annotation, Book, BookEdit, DashboardStats, ImportResult, MetaCandidate, ScanResult, Settings,
 };
 use crate::scanner::now_ts;
-use crate::{covers, metadata, scanner};
+use crate::{covers, importer, metadata, scanner};
 
 pub struct AppState {
     pub conn: Mutex<Connection>,
@@ -59,6 +59,12 @@ pub fn list_categories(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 }
 
 #[tauri::command]
+pub fn list_tags(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let conn = state.conn.lock().map_err(s)?;
+    db::list_tags(&conn).map_err(s)
+}
+
+#[tauri::command]
 pub fn dashboard_stats(state: State<'_, AppState>) -> CmdResult<DashboardStats> {
     let conn = state.conn.lock().map_err(s)?;
     db::dashboard(&conn).map_err(s)
@@ -86,6 +92,49 @@ pub fn scan_library(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Sca
         },
     )
     .map_err(s)
+}
+
+#[tauri::command]
+pub fn import_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    kind: String,
+) -> CmdResult<ImportResult> {
+    if paths.is_empty() {
+        return Err("Choose at least one file to import.".into());
+    }
+    if kind != "book" && kind != "comic" {
+        return Err("Import destination must be books or comics.".into());
+    }
+    let conn = state.conn.lock().map_err(s)?;
+    let settings = db::load_settings(&conn).map_err(s)?;
+    let root = if kind == "comic" { &settings.comics_root } else { &settings.books_root };
+    if root.trim().is_empty() {
+        return Err(format!("Set your {kind}s folder in Settings before importing."));
+    }
+    let (copied, skipped) = importer::copy_into_library(
+        &paths,
+        &PathBuf::from(root),
+        &kind,
+        settings.words_per_page,
+        |ev| {
+            let _ = app.emit("scan-progress", ev);
+        },
+    )
+    .map_err(s)?;
+    let scan = scanner::scan(
+        &conn,
+        &PathBuf::from(&settings.books_root),
+        &PathBuf::from(&settings.comics_root),
+        &state.covers_dir,
+        settings.words_per_page,
+        |ev| {
+            let _ = app.emit("scan-progress", ev);
+        },
+    )
+    .map_err(s)?;
+    Ok(ImportResult { copied, skipped, scan })
 }
 
 // ---------------- edits & reading state ----------------

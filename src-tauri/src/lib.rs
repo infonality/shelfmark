@@ -7,6 +7,7 @@ mod covers;
 mod db;
 mod error;
 mod formats;
+mod importer;
 mod metadata;
 mod models;
 mod pdf;
@@ -126,8 +127,10 @@ pub fn run() {
             commands::list_books,
             commands::get_book,
             commands::list_categories,
+            commands::list_tags,
             commands::dashboard_stats,
             commands::scan_library,
+            commands::import_files,
             commands::update_book,
             commands::set_status,
             commands::set_progress,

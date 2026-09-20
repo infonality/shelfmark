@@ -10,6 +10,7 @@ import {
   MetaCandidate,
   POPULAR_CATEGORIES,
   Status,
+  tagsOf,
 } from "../api";
 import { Badge, Button, Icon, Spinner, StarRating, cx, statusMeta } from "../ui";
 import { groupBySeries, SeriesGroup, Shelf, seriesOf, shelfCover } from "../series";
@@ -47,6 +48,7 @@ export default function Library({
   onReload,
   onOpen,
   kind,
+  tag = null,
 }: {
   reloadToken: number;
   onReload: () => void;
@@ -54,6 +56,8 @@ export default function Library({
   onOpen: (book: Book) => Promise<Book>;
   /** Which half of the library this view shows. */
   kind: Kind;
+  /** Sidebar collection selected from a book's comma-separated tags. */
+  tag?: string | null;
 }) {
   const [books, setBooks] = useState<Book[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
@@ -88,9 +92,18 @@ export default function Library({
     };
   }, [reloadToken, kind]);
 
+  useEffect(() => {
+    setSelectedId(null);
+    setOpenSeries(null);
+  }, [tag]);
+
   const selected = useMemo(() => books.find((b) => b.id === selectedId) ?? null, [books, selectedId]);
 
-  const upsert = (b: Book) => setBooks((prev) => prev.map((x) => (x.id === b.id ? b : x)));
+  const upsert = (b: Book) => {
+    const old = books.find((x) => x.id === b.id);
+    setBooks((prev) => prev.map((x) => (x.id === b.id ? b : x)));
+    if (old?.tags !== b.tags) onReload();
+  };
 
   /**
    * EPUBs open in their own reader window so reading sits alongside the
@@ -122,12 +135,13 @@ export default function Library({
     const q = search.trim().toLowerCase();
     const rows = books.filter((b) => {
       if (status !== "all" && b.status !== status) return false;
+      if (tag && !tagsOf(b.tags).some((t) => t.toLowerCase() === tag.toLowerCase())) return false;
       if (category !== "all") {
         const cat = b.category && b.category.trim() ? b.category : "Uncategorized";
         if (cat !== category) return false;
       }
       if (q) {
-        const hay = `${b.title} ${b.author ?? ""} ${b.series ?? ""}`.toLowerCase();
+        const hay = `${b.title} ${b.author ?? ""} ${b.series ?? ""} ${b.tags ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -169,7 +183,7 @@ export default function Library({
       if (va > vb) return 1 * dir;
       return a.title.localeCompare(b.title);
     });
-  }, [books, status, category, search, sort, kind]);
+  }, [books, status, category, search, sort, kind, tag]);
 
   function toggleSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
@@ -233,7 +247,7 @@ export default function Library({
         ) : (
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">
-              {kind === "comic" ? "Comics" : "Books"}
+              {kind === "comic" ? "Comics" : tag ?? "Books"}
             </h1>
             <p className="mt-1 text-sm text-slate-400">
               {filtered.length.toLocaleString()}{" "}
@@ -244,6 +258,7 @@ export default function Library({
                 : filtered.length === 1
                   ? "book"
                   : "books"}
+              {tag && " in this collection"}
               {shelfCount > 0 &&
                 ` in ${shelfCount.toLocaleString()} ${shelfCount === 1 ? "series" : "series"}`}
               {status !== "all" && ` · ${status}`}
@@ -901,6 +916,7 @@ function BookDrawer({
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <Badge tone="slate">{book.format.toUpperCase()}</Badge>
                 {book.category?.trim() && <Badge tone="accent">{book.category}</Badge>}
+                {tagsOf(book.tags).map((tag) => <Badge key={tag.toLowerCase()} tone="slate">{tag}</Badge>)}
                 {book.meta_status === "fetched" && <Badge tone="blue">Open Library</Badge>}
                 {book.meta_status === "manual" && <Badge tone="amber">Edited</Badge>}
               </div>
@@ -1051,6 +1067,14 @@ function BookDrawer({
             </Field>
             <Field label="Subjects / genres">
               <input className={inputCls} value={form.subjects ?? ""} onChange={(e) => set("subjects", e.target.value)} />
+            </Field>
+            <Field label="Tags / collections">
+              <input
+                className={inputCls}
+                value={form.tags ?? ""}
+                onChange={(e) => set("tags", e.target.value)}
+                placeholder="Research, Favorites, Work"
+              />
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Publisher">
@@ -1238,6 +1262,7 @@ function toEdit(b: Book): BookEdit {
     description: b.description,
     category: b.category,
     subjects: b.subjects,
+    tags: b.tags,
     pages: b.pages,
     words: b.words,
   };
@@ -1260,6 +1285,7 @@ function normalize(e: BookEdit): BookEdit {
     description: s(e.description),
     category: s(e.category),
     subjects: s(e.subjects),
+    tags: tagsOf(e.tags).join(", ") || null,
     pages: e.pages && e.pages > 0 ? e.pages : null,
     words: e.words && e.words > 0 ? e.words : null,
   };

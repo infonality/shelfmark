@@ -23,6 +23,8 @@ export interface Book {
   description: string | null;
   category: string | null;
   subjects: string | null;
+  /** Comma-separated user collections. */
+  tags: string | null;
   cover_path: string | null;
   pages: number | null;
   words: number | null;
@@ -57,6 +59,7 @@ export interface BookEdit {
   description: string | null;
   category: string | null;
   subjects: string | null;
+  tags: string | null;
   pages: number | null;
   words: number | null;
 }
@@ -105,6 +108,12 @@ export interface ScanResult {
   updated: number;
   removed: number;
   total: number;
+}
+
+export interface ImportResult {
+  copied: number;
+  skipped: number;
+  scan: ScanResult;
 }
 
 /** Popular preset shelves/genres offered in the category picker. */
@@ -291,9 +300,12 @@ export const api = {
   listBooks: () => invoke<Book[]>("list_books"),
   getBook: (id: number) => invoke<Book | null>("get_book", { id }),
   listCategories: () => invoke<string[]>("list_categories"),
+  listTags: () => invoke<string[]>("list_tags"),
   dashboardStats: () => invoke<DashboardStats>("dashboard_stats"),
 
   scanLibrary: () => invoke<ScanResult>("scan_library"),
+  importFiles: (paths: string[], kind: Kind) =>
+    invoke<ImportResult>("import_files", { paths, kind }),
 
   updateBook: (id: number, edit: BookEdit) => invoke<Book>("update_book", { id, edit }),
   setStatus: (id: number, status: Status) => invoke<Book>("set_status", { id, status }),
@@ -351,6 +363,34 @@ export async function pickFolder(title?: string): Promise<string | undefined> {
   const result = await open({ directory: true, multiple: false, title });
   if (typeof result === "string") return result;
   return undefined;
+}
+
+/** Choose one or more supported files for a shelf. */
+export async function pickLibraryFiles(kind: Kind): Promise<string[]> {
+  const extensions = kind === "comic" ? ["cbz", "cbr", "pdf"] : ["epub", "pdf", "mobi", "azw", "azw3"];
+  const result = await open({
+    directory: false,
+    multiple: true,
+    title: kind === "comic" ? "Import comics" : "Import books",
+    filters: [{ name: kind === "comic" ? "Comics" : "Books", extensions }],
+  });
+  if (Array.isArray(result)) return result;
+  return typeof result === "string" ? [result] : [];
+}
+
+/** Parse, trim and de-duplicate the comma-separated collection field. */
+export function tagsOf(value: string | null | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of (value ?? "").split(",")) {
+    const tag = raw.trim();
+    const key = tag.toLowerCase();
+    if (tag && !seen.has(key)) {
+      seen.add(key);
+      out.push(tag);
+    }
+  }
+  return out;
 }
 
 export function formatBytes(bytes: number): string {

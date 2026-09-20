@@ -43,8 +43,10 @@ pub fn scan(
 ) -> Result<ScanResult> {
     let mut result = ScanResult::default();
 
-    let books_ok = books_root.is_dir();
-    let comics_ok = comics_root.is_dir();
+    // An empty Path resolves to the current working directory on some
+    // platforms; an unset root must not make a scan walk the app directory.
+    let books_ok = !books_root.as_os_str().is_empty() && books_root.is_dir();
+    let comics_ok = !comics_root.as_os_str().is_empty() && comics_root.is_dir();
     if !books_ok && !comics_ok {
         anyhow::bail!(
             "Neither folder exists. Books: {}. Comics: {}",

@@ -97,6 +97,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     // handful of other runs need the other answer, and almost no archive says
     // so itself, which is why this is a choice rather than a detection.
     add_column(conn, "books", "reading_direction", "TEXT")?;
+    add_column(conn, "books", "tags", "TEXT")?;
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_books_kind ON books(kind);")?;
     Ok(())
 }
@@ -157,7 +158,7 @@ pub fn save_settings(conn: &Connection, s: &Settings) -> Result<()> {
 // ---------- books ----------
 
 const BOOK_COLS: &str = "id, path, filename, format, size, title, author, series, publisher,
-    published_date, language, isbn, description, category, subjects, cover_path, pages, words,
+    published_date, language, isbn, description, category, subjects, tags, cover_path, pages, words,
     words_estimated, status, current_page, rating, meta_status, meta_source, started_at,
     finished_at, last_opened_at, locator, kind, reading_direction, added_at, updated_at";
 
@@ -178,23 +179,24 @@ fn row_to_book(r: &Row) -> rusqlite::Result<Book> {
         description: r.get(12)?,
         category: r.get(13)?,
         subjects: r.get(14)?,
-        cover_path: r.get(15)?,
-        pages: r.get(16)?,
-        words: r.get(17)?,
-        words_estimated: r.get::<_, i64>(18)? != 0,
-        status: r.get(19)?,
-        current_page: r.get(20)?,
-        rating: r.get(21)?,
-        meta_status: r.get(22)?,
-        meta_source: r.get(23)?,
-        started_at: r.get(24)?,
-        finished_at: r.get(25)?,
-        last_opened_at: r.get(26)?,
-        locator: r.get(27)?,
-        kind: r.get(28)?,
-        reading_direction: r.get(29)?,
-        added_at: r.get(30)?,
-        updated_at: r.get(31)?,
+        tags: r.get(15)?,
+        cover_path: r.get(16)?,
+        pages: r.get(17)?,
+        words: r.get(18)?,
+        words_estimated: r.get::<_, i64>(19)? != 0,
+        status: r.get(20)?,
+        current_page: r.get(21)?,
+        rating: r.get(22)?,
+        meta_status: r.get(23)?,
+        meta_source: r.get(24)?,
+        started_at: r.get(25)?,
+        finished_at: r.get(26)?,
+        last_opened_at: r.get(27)?,
+        locator: r.get(28)?,
+        kind: r.get(29)?,
+        reading_direction: r.get(30)?,
+        added_at: r.get(31)?,
+        updated_at: r.get(32)?,
     })
 }
 
@@ -303,6 +305,26 @@ pub fn list_categories(conn: &Connection) -> Result<Vec<String>> {
     Ok(rows)
 }
 
+/// Distinct comma-separated tags currently assigned to books.
+pub fn list_tags(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT tags FROM books WHERE kind='book' AND tags IS NOT NULL AND tags <> ''",
+    )?;
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut tags = std::collections::BTreeMap::<String, String>::new();
+    for value in values {
+        for raw in value.split(',') {
+            let tag = raw.trim();
+            if !tag.is_empty() {
+                tags.entry(tag.to_lowercase()).or_insert_with(|| tag.to_string());
+            }
+        }
+    }
+    Ok(tags.into_values().collect())
+}
+
 /// Apply user-edited bibliographic fields. Marks metadata as manual and, when a
 /// page count is present but words are missing, fills a word estimate.
 pub fn update_book(conn: &Connection, id: i64, e: &BookEdit, words_per_page: i64, now: i64) -> Result<()> {
@@ -315,12 +337,12 @@ pub fn update_book(conn: &Connection, id: i64, e: &BookEdit, words_per_page: i64
     conn.execute(
         "UPDATE books SET
             title=?2, author=?3, series=?4, publisher=?5, published_date=?6, language=?7,
-            isbn=?8, description=?9, category=?10, subjects=?11, pages=?12, words=?13,
-            words_estimated=?14, meta_status='manual', updated_at=?15
+            isbn=?8, description=?9, category=?10, subjects=?11, tags=?12, pages=?13, words=?14,
+            words_estimated=?15, meta_status='manual', updated_at=?16
          WHERE id=?1",
         params![
             id, e.title, e.author, e.series, e.publisher, e.published_date, e.language,
-            e.isbn, e.description, e.category, e.subjects, e.pages, words,
+            e.isbn, e.description, e.category, e.subjects, e.tags, e.pages, words,
             words_estimated as i64, now
         ],
     )?;
@@ -570,6 +592,31 @@ pub fn update_annotation(
 pub fn delete_annotation(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM annotations WHERE id=?1", [id])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_migration_round_trips_and_lists_collections() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO books(path, filename, format, size, title, tags, kind)
+             VALUES('one.epub','one.epub','epub',1,'One','Research, Favorites','book')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO books(path, filename, format, size, title, tags, kind)
+             VALUES('two.epub','two.epub','epub',1,'Two','favorites, Work','book')",
+            [],
+        ).unwrap();
+
+        let book = get_book(&conn, 1).unwrap().unwrap();
+        assert_eq!(book.tags.as_deref(), Some("Research, Favorites"));
+        assert_eq!(list_tags(&conn).unwrap(), vec!["Favorites", "Research", "Work"]);
+    }
 }
 
 pub fn delete_book(conn: &Connection, id: i64) -> Result<()> {

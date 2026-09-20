@@ -58,6 +58,13 @@ Walks a directory (subfolders included) and indexes every `.epub`, `.pdf`,
 description and page count out of the file itself. Comics get a folder of their
 own, because a comic is often just a PDF and only you know which is which.
 
+**Imports without making a mess**
+Choose files or drag them onto Shelfmark and it copies them into the active
+library as `Imported/<Author>/<Title>/<original file>`. Comic imports use the
+series in place of the author. Existing files are never overwritten, identical
+reimports are skipped, and files you already arranged elsewhere in the library
+are left where they are.
+
 **Keeps comics in order**
 `.cbz` and `.cbr` sit in a separate Comics section, tagged from `ComicInfo.xml`
 where a file carries one. Volumes of the same run collapse into a single shelf
@@ -101,6 +108,9 @@ progress, a 1 to 5 star rating, and free text categories with a preset picker.
 Reading an EPUB in the built in reader updates progress on its own; nothing to
 type in.
 
+Comma-separated tags create collections under **Books** in the sidebar. One
+book can appear in as many collections as needed without moving its file.
+
 **Shows you the numbers**
 A dashboard counting books read, comics read, pages read and what you're
 part way through, plus a breakdown by category. Totals move when you finish
@@ -121,8 +131,10 @@ The builds aren't code signed, so the first launch needs a nudge: on macOS
 right click the app and choose **Open**; on Windows click **More info → Run
 anyway**; the AppImage needs `chmod +x` before it will run.
 
-Then open **Settings**, choose the folder your books live in, and a second one
-for comics if you keep them, and hit **Scan**.
+Then open **Settings** and choose the folder your books live in, plus a second
+one for comics if you keep them. Paths save automatically. Scan an existing
+folder, or use **Import Books/Comics** and drag and drop to copy new files into
+the organized `Imported` subtree.
 
 ## How the metadata works
 
@@ -221,7 +233,8 @@ src-tauri/src/
 ```
 
 Your library lives in the platform app data directory, `library.db` plus a
-`covers/` folder. Shelfmark never modifies the files themselves.
+`covers/` folder. Shelfmark never modifies source book files; importing makes a
+copy inside the configured library root.
 
 The bundle identifier is still `com.kas.bookvault`, from when this was called
 Book Vault. That string is what picks the app data directory, so changing it

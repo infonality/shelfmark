@@ -26,6 +26,8 @@ pub struct Book {
     pub category: Option<String>,
     /// Comma-joined genres / subjects.
     pub subjects: Option<String>,
+    /// User-assigned comma-separated collections.
+    pub tags: Option<String>,
     /// Stored local cover image path (for the asset protocol).
     pub cover_path: Option<String>,
 
@@ -74,6 +76,7 @@ pub struct BookEdit {
     pub description: Option<String>,
     pub category: Option<String>,
     pub subjects: Option<String>,
+    pub tags: Option<String>,
     pub pages: Option<i64>,
     pub words: Option<i64>,
 }
@@ -176,4 +179,12 @@ pub struct ScanResult {
     pub updated: usize,
     pub removed: usize,
     pub total: usize,
+}
+
+/// Result of copying files into the managed portion of a library root.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ImportResult {
+    pub copied: usize,
+    pub skipped: usize,
+    pub scan: ScanResult,
 }
