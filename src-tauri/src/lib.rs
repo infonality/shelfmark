@@ -116,6 +116,7 @@ pub fn run() {
 
             app.manage(AppState {
                 conn: Mutex::new(conn),
+                db_path,
                 http,
                 covers_dir,
             });
@@ -125,6 +126,7 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::list_books,
+            commands::query_library,
             commands::get_book,
             commands::list_categories,
             commands::list_tags,

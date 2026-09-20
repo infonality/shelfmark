@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { openReaderWindow, readsInApp } from "../open-book";
 import {
@@ -10,6 +10,8 @@ import {
   MetaCandidate,
   POPULAR_CATEGORIES,
   Status,
+  StatusCounts,
+  CategoryCount,
   tagsOf,
 } from "../api";
 import { Badge, Button, Icon, Spinner, StarRating, cx, statusMeta } from "../ui";
@@ -18,6 +20,7 @@ import { groupBySeries, SeriesGroup, Shelf, seriesOf, shelfCover } from "../seri
 type SortKey = "title" | "author" | "category" | "status" | "progress" | "rating" | "pages";
 type StatusFilter = "all" | Status;
 type ViewMode = "list" | "grid";
+const PAGE_SIZE = 120;
 
 /** Comics are cover-led, so they open in grid by default; books in list. */
 function viewKey(kind: Kind) {
@@ -70,6 +73,15 @@ export default function Library({
   const [view, setView] = useState<ViewMode>(() => loadViewMode(kind));
   /** Comics only: the series currently opened, by group key. */
   const [openSeries, setOpenSeries] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
+  const [serverCounts, setServerCounts] = useState<StatusCounts | null>(null);
+  const [serverCategories, setServerCategories] = useState<CategoryCount[]>([]);
+  const [page, setPage] = useState(0);
+  const deferredSearch = useDeferredValue(search);
+  const bookQueryKey =
+    kind === "book"
+      ? [reloadToken, status, category, deferredSearch, sort.key, sort.dir, tag ?? "", page].join("\u0001")
+      : String(reloadToken);
 
   // Remember the last chosen layout per section, across launches.
   useEffect(() => {
@@ -79,18 +91,51 @@ export default function Library({
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    Promise.all([api.listBooks(), api.listCategories()])
-      .then(([b, c]) => {
-        if (!alive) return;
-        setBooks(b.filter((x) => x.kind === kind));
-        setCategories(c);
-      })
+    const request =
+      kind === "book"
+        ? Promise.all([
+            api.queryLibrary({
+              kind,
+              status,
+              category,
+              tag,
+              search: deferredSearch,
+              sort: sort.key,
+              descending: sort.dir === -1,
+              offset: page * PAGE_SIZE,
+              limit: PAGE_SIZE,
+            }),
+            api.listCategories(),
+          ]).then(([result, allCategories]) => {
+            if (!alive) return;
+            setBooks(result.books);
+            setTotal(result.total);
+            setServerCounts(result.counts);
+            setServerCategories(result.categories);
+            setCategories(allCategories);
+            const lastPage = Math.max(0, Math.ceil(result.total / PAGE_SIZE) - 1);
+            if (page > lastPage) setPage(lastPage);
+          })
+        : Promise.all([api.listBooks(), api.listCategories()]).then(([allBooks, allCategories]) => {
+            if (!alive) return;
+            const comics = allBooks.filter((x) => x.kind === kind);
+            setBooks(comics);
+            setTotal(comics.length);
+            setServerCounts(null);
+            setServerCategories([]);
+            setCategories(allCategories);
+          });
+    request
       .catch(() => {})
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, [reloadToken, kind]);
+  }, [bookQueryKey, kind]);
+
+  useEffect(() => {
+    setPage(0);
+  }, [status, category, deferredSearch, sort.key, sort.dir, kind, tag]);
 
   useEffect(() => {
     setSelectedId(null);
@@ -102,7 +147,7 @@ export default function Library({
   const upsert = (b: Book) => {
     const old = books.find((x) => x.id === b.id);
     setBooks((prev) => prev.map((x) => (x.id === b.id ? b : x)));
-    if (old?.tags !== b.tags) onReload();
+    if (kind === "book" || old?.tags !== b.tags) onReload();
   };
 
   /**
@@ -123,15 +168,17 @@ export default function Library({
   }
 
   const counts = useMemo(() => {
+    if (kind === "book") return new Map(serverCategories.map((c) => [c.name, c.total]));
     const c = new Map<string, number>();
     for (const b of books) {
       const key = b.category && b.category.trim() ? b.category : "Uncategorized";
       c.set(key, (c.get(key) ?? 0) + 1);
     }
     return c;
-  }, [books]);
+  }, [books, kind, serverCategories]);
 
   const filtered = useMemo(() => {
+    if (kind === "book") return books;
     const q = search.trim().toLowerCase();
     const rows = books.filter((b) => {
       if (status !== "all" && b.status !== status) return false;
@@ -220,6 +267,8 @@ export default function Library({
     const ids = new Set(current.books.map((b) => b.id));
     return filtered.filter((b) => ids.has(b.id));
   }, [current, filtered]);
+  const resultCount = kind === "book" ? total : filtered.length;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div className="space-y-5">
@@ -250,12 +299,12 @@ export default function Library({
               {kind === "comic" ? "Comics" : tag ?? "Books"}
             </h1>
             <p className="mt-1 text-sm text-slate-400">
-              {filtered.length.toLocaleString()}{" "}
+              {resultCount.toLocaleString()}{" "}
               {kind === "comic"
-                ? filtered.length === 1
+                ? resultCount === 1
                   ? "issue"
                   : "issues"
-                : filtered.length === 1
+                : resultCount === 1
                   ? "book"
                   : "books"}
               {tag && " in this collection"}
@@ -269,23 +318,29 @@ export default function Library({
 
       {/* Status tabs */}
       <div className="flex flex-wrap items-center gap-2">
-        {STATUS_TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setStatus(t.id)}
-            className={cx(
-              "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-              status === t.id
-                ? "border-accent-500/40 bg-accent-500/20 text-white"
-                : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-            )}
-          >
-            {t.label}
-            <span className="ml-1 text-slate-500">
-              {t.id === "all" ? books.length : books.filter((b) => b.status === t.id).length}
-            </span>
-          </button>
-        ))}
+        {STATUS_TABS.map((t) => {
+          const count =
+            kind === "book" && serverCounts
+              ? serverCounts[t.id]
+              : t.id === "all"
+                ? books.length
+                : books.filter((b) => b.status === t.id).length;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setStatus(t.id)}
+              className={cx(
+                "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                status === t.id
+                  ? "border-accent-500/40 bg-accent-500/20 text-white"
+                  : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+              )}
+            >
+              {t.label}
+              <span className="ml-1 text-slate-500">{count}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Search + category */}
@@ -339,7 +394,7 @@ export default function Library({
         <div className="flex items-center gap-3 py-10 text-slate-400">
           <Spinner className="h-5 w-5" /> Loading library…
         </div>
-      ) : filtered.length === 0 ? (
+      ) : resultCount === 0 ? (
         <p className="py-10 text-center text-sm text-slate-500">
           {books.length === 0
             ? kind === "comic"
@@ -425,6 +480,24 @@ export default function Library({
             </tbody>
           </table>
         </div>
+      )}
+
+      {kind === "book" && total > PAGE_SIZE && (
+        <nav className="flex items-center justify-center gap-3" aria-label="Library pages">
+          <Button variant="subtle" disabled={page === 0 || loading} onClick={() => setPage((p) => Math.max(0, p - 1))}>
+            Previous
+          </Button>
+          <span className="text-sm tabular-nums text-slate-400">
+            Page {page + 1} of {pageCount}
+          </span>
+          <Button
+            variant="subtle"
+            disabled={page + 1 >= pageCount || loading}
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+          >
+            Next
+          </Button>
+        </nav>
       )}
 
       {selected && (

@@ -106,6 +106,7 @@ export interface MetaCandidate {
 export interface ScanResult {
   added: number;
   updated: number;
+  unchanged: number;
   removed: number;
   total: number;
 }
@@ -114,6 +115,37 @@ export interface ImportResult {
   copied: number;
   skipped: number;
   scan: ScanResult;
+}
+
+export interface LibraryQuery {
+  kind: Kind;
+  status: Status | "all" | null;
+  category: string | null;
+  tag: string | null;
+  search: string | null;
+  sort: "title" | "author" | "category" | "status" | "progress" | "rating" | "pages";
+  descending: boolean;
+  offset: number;
+  limit: number;
+}
+
+export interface StatusCounts {
+  all: number;
+  unread: number;
+  reading: number;
+  finished: number;
+}
+
+export interface CategoryCount {
+  name: string;
+  total: number;
+}
+
+export interface LibraryPage {
+  books: Book[];
+  total: number;
+  counts: StatusCounts;
+  categories: CategoryCount[];
 }
 
 /** Popular preset shelves/genres offered in the category picker. */
@@ -298,6 +330,7 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
 
   listBooks: () => invoke<Book[]>("list_books"),
+  queryLibrary: (query: LibraryQuery) => invoke<LibraryPage>("query_library", { query }),
   getBook: (id: number) => invoke<Book | null>("get_book", { id }),
   listCategories: () => invoke<string[]>("list_categories"),
   listTags: () => invoke<string[]>("list_tags"),

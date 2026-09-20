@@ -57,6 +57,8 @@ Walks a directory (subfolders included) and indexes every `.epub`, `.pdf`,
 `.mobi`, `.azw`, and `.azw3`, reading title, author, publisher, subjects, ISBN,
 description and page count out of the file itself. Comics get a folder of their
 own, because a comic is often just a PDF and only you know which is which.
+After the first scan, file size and modification time let later scans skip books
+that have not changed instead of reopening and recounting every chapter.
 
 **Imports without making a mess**
 Choose files or drag them onto Shelfmark and it copies them into the active
@@ -107,6 +109,12 @@ A sortable table or a cover grid of everything you own, with reading status,
 progress, a 1 to 5 star rating, and free text categories with a preset picker.
 Reading an EPUB in the built in reader updates progress on its own; nothing to
 type in.
+
+Large book libraries are searched and sorted in SQLite and shown in bounded
+pages, so a collection with thousands of records does not create thousands of
+rows or cover elements in the app at once. Search uses a local full-text index.
+Cached covers are reduced to shelf-sized images and files left behind by removed
+books are cleaned up during scans.
 
 Comma-separated tags create collections under **Books** in the sidebar. One
 book can appear in as many collections as needed without moving its file.

@@ -1,6 +1,6 @@
 [package]
 name = "shelfmark"
-version = "0.5.25"
+version = "0.5.26"
 description = "Shelfmark - personal library and reader for ebooks and comics"
 authors = ["Kas"]
 edition = "2021"
@@ -39,7 +39,7 @@ lopdf = { version = "0.44", default-features = false }  # pdf metadata + page co
 
 # pdf first-page cover rendering (PDFium; needs pdfium.dll alongside the app)
 pdfium-render = { version = "0.8", features = ["image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # errors / util
 anyhow = "1"

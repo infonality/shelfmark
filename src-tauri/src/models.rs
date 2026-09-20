@@ -81,6 +81,43 @@ pub struct BookEdit {
     pub words: Option<i64>,
 }
 
+/// Server-side library filters. Keeping this work in SQLite means the UI only
+/// receives the page it can display instead of every full metadata record.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibraryQuery {
+    pub kind: String,
+    pub status: Option<String>,
+    pub category: Option<String>,
+    pub tag: Option<String>,
+    pub search: Option<String>,
+    pub sort: String,
+    pub descending: bool,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct StatusCounts {
+    pub all: i64,
+    pub unread: i64,
+    pub reading: i64,
+    pub finished: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CategoryCount {
+    pub name: String,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryPage {
+    pub books: Vec<Book>,
+    pub total: i64,
+    pub counts: StatusCounts,
+    pub categories: Vec<CategoryCount>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     /// Root folder that holds the book files.
@@ -177,6 +214,7 @@ pub struct ProgressEvent {
 pub struct ScanResult {
     pub added: usize,
     pub updated: usize,
+    pub unchanged: usize,
     pub removed: usize,
     pub total: usize,
 }

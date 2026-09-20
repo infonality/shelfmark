@@ -9,13 +9,15 @@ use tauri::{AppHandle, Emitter, State};
 use crate::db;
 use crate::error::CmdResult;
 use crate::models::{
-    Annotation, Book, BookEdit, DashboardStats, ImportResult, MetaCandidate, ScanResult, Settings,
+    Annotation, Book, BookEdit, DashboardStats, ImportResult, LibraryPage, LibraryQuery,
+    MetaCandidate, ScanResult, Settings,
 };
 use crate::scanner::now_ts;
 use crate::{covers, importer, metadata, scanner};
 
 pub struct AppState {
     pub conn: Mutex<Connection>,
+    pub db_path: PathBuf,
     pub http: reqwest::Client,
     pub covers_dir: PathBuf,
 }
@@ -47,6 +49,12 @@ pub fn list_books(state: State<'_, AppState>) -> CmdResult<Vec<Book>> {
 }
 
 #[tauri::command]
+pub fn query_library(state: State<'_, AppState>, query: LibraryQuery) -> CmdResult<LibraryPage> {
+    let conn = state.conn.lock().map_err(s)?;
+    db::query_library(&conn, &query).map_err(s)
+}
+
+#[tauri::command]
 pub fn get_book(state: State<'_, AppState>, id: i64) -> CmdResult<Option<Book>> {
     let conn = state.conn.lock().map_err(s)?;
     db::get_book(&conn, id).map_err(s)
@@ -73,29 +81,38 @@ pub fn dashboard_stats(state: State<'_, AppState>) -> CmdResult<DashboardStats> 
 // ---------------- scan ----------------
 
 #[tauri::command]
-pub fn scan_library(app: AppHandle, state: State<'_, AppState>) -> CmdResult<ScanResult> {
-    let conn = state.conn.lock().map_err(s)?;
-    let settings = db::load_settings(&conn).map_err(s)?;
+pub async fn scan_library(app: AppHandle, state: State<'_, AppState>) -> CmdResult<ScanResult> {
+    let settings = {
+        let conn = state.conn.lock().map_err(s)?;
+        db::load_settings(&conn).map_err(s)?
+    };
     if settings.books_root.trim().is_empty() && settings.comics_root.trim().is_empty() {
         return Err("Set your books or comics folder in Settings first.".into());
     }
     let books = PathBuf::from(&settings.books_root);
     let comics = PathBuf::from(&settings.comics_root);
-    scanner::scan(
-        &conn,
-        &books,
-        &comics,
-        &state.covers_dir,
-        settings.words_per_page,
-        |ev| {
-            let _ = app.emit("scan-progress", ev);
-        },
-    )
+    let db_path = state.db_path.clone();
+    let covers_dir = state.covers_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let scan_conn = db::connect(&db_path)?;
+        scanner::scan(
+            &scan_conn,
+            &books,
+            &comics,
+            &covers_dir,
+            settings.words_per_page,
+            |ev| {
+                let _ = app.emit("scan-progress", ev);
+            },
+        )
+    })
+    .await
+    .map_err(s)?
     .map_err(s)
 }
 
 #[tauri::command]
-pub fn import_files(
+pub async fn import_files(
     app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
@@ -107,34 +124,53 @@ pub fn import_files(
     if kind != "book" && kind != "comic" {
         return Err("Import destination must be books or comics.".into());
     }
-    let conn = state.conn.lock().map_err(s)?;
-    let settings = db::load_settings(&conn).map_err(s)?;
-    let root = if kind == "comic" { &settings.comics_root } else { &settings.books_root };
+    let settings = {
+        let conn = state.conn.lock().map_err(s)?;
+        db::load_settings(&conn).map_err(s)?
+    };
+    let root = if kind == "comic" {
+        &settings.comics_root
+    } else {
+        &settings.books_root
+    };
     if root.trim().is_empty() {
-        return Err(format!("Set your {kind}s folder in Settings before importing."));
+        return Err(format!(
+            "Set your {kind}s folder in Settings before importing."
+        ));
     }
-    let (copied, skipped) = importer::copy_into_library(
-        &paths,
-        &PathBuf::from(root),
-        &kind,
-        settings.words_per_page,
-        |ev| {
-            let _ = app.emit("scan-progress", ev);
-        },
-    )
-    .map_err(s)?;
-    let scan = scanner::scan(
-        &conn,
-        &PathBuf::from(&settings.books_root),
-        &PathBuf::from(&settings.comics_root),
-        &state.covers_dir,
-        settings.words_per_page,
-        |ev| {
-            let _ = app.emit("scan-progress", ev);
-        },
-    )
-    .map_err(s)?;
-    Ok(ImportResult { copied, skipped, scan })
+    let import_root = PathBuf::from(root);
+    let db_path = state.db_path.clone();
+    let covers_dir = state.covers_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (copied, skipped) = importer::copy_into_library(
+            &paths,
+            &import_root,
+            &kind,
+            settings.words_per_page,
+            |ev| {
+                let _ = app.emit("scan-progress", ev);
+            },
+        )?;
+        let scan_conn = db::connect(&db_path)?;
+        let scan = scanner::scan(
+            &scan_conn,
+            &PathBuf::from(&settings.books_root),
+            &PathBuf::from(&settings.comics_root),
+            &covers_dir,
+            settings.words_per_page,
+            |ev| {
+                let _ = app.emit("scan-progress", ev);
+            },
+        )?;
+        Ok::<_, anyhow::Error>(ImportResult {
+            copied,
+            skipped,
+            scan,
+        })
+    })
+    .await
+    .map_err(s)?
+    .map_err(s)
 }
 
 // ---------------- edits & reading state ----------------
@@ -199,10 +235,17 @@ pub fn reader_open(state: State<'_, AppState>, id: i64) -> CmdResult<ReaderSessi
         (b.path, b.title, db::get_locator(&conn, id).map_err(s)?)
     };
     if !std::path::Path::new(&path).is_file() {
-        return Err(format!("The file is no longer at {path}. Rescan your library."));
+        return Err(format!(
+            "The file is no longer at {path}. Rescan your library."
+        ));
     }
     let book = crate::reader::open(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
-    Ok(ReaderSession { book, resource_base: resource_base(id), locator, title })
+    Ok(ReaderSession {
+        book,
+        resource_base: resource_base(id),
+        locator,
+        title,
+    })
 }
 
 #[tauri::command]
@@ -241,8 +284,7 @@ pub fn reader_search(
         db::require_book(&conn, id).map_err(s)?.path
     };
     // Capped so a single-letter query on a long book can't flood the UI.
-    crate::reader::search(std::path::Path::new(&path), &query, 300)
-        .map_err(|e| format!("{e:#}"))
+    crate::reader::search(std::path::Path::new(&path), &query, 300).map_err(|e| format!("{e:#}"))
 }
 
 // ---------------- built-in PDF reader ----------------
@@ -269,7 +311,11 @@ pub struct PdfSession {
 /// milliseconds, which is nothing on its own and half a minute across a
 /// five-hundred-page book nobody has scrolled to yet.
 #[tauri::command]
-pub fn pdf_text(state: State<'_, AppState>, id: i64, page: usize) -> CmdResult<Vec<crate::pdf::TextRun>> {
+pub fn pdf_text(
+    state: State<'_, AppState>,
+    id: i64,
+    page: usize,
+) -> CmdResult<Vec<crate::pdf::TextRun>> {
     let path = {
         let conn = state.conn.lock().map_err(s)?;
         db::require_book(&conn, id).map_err(s)?.path
@@ -285,7 +331,9 @@ pub fn pdf_open(state: State<'_, AppState>, id: i64) -> CmdResult<PdfSession> {
         (b.path, b.title, db::get_locator(&conn, id).map_err(s)?)
     };
     if !std::path::Path::new(&path).is_file() {
-        return Err(format!("The file is no longer at {path}. Rescan your library."));
+        return Err(format!(
+            "The file is no longer at {path}. Rescan your library."
+        ));
     }
     // Opening a book is the moment to drop what was rendered from the last
     // copy of it: a file replaced on disk while the app was running would
@@ -307,7 +355,11 @@ pub fn pdf_open(state: State<'_, AppState>, id: i64) -> CmdResult<PdfSession> {
 /// about a second, which is a fine price for never having a stale index and
 /// never having to decide when to rebuild one.
 #[tauri::command]
-pub fn pdf_search(state: State<'_, AppState>, id: i64, query: String) -> CmdResult<Vec<crate::pdf::SearchHit>> {
+pub fn pdf_search(
+    state: State<'_, AppState>,
+    id: i64,
+    query: String,
+) -> CmdResult<Vec<crate::pdf::SearchHit>> {
     let path = {
         let conn = state.conn.lock().map_err(s)?;
         db::require_book(&conn, id).map_err(s)?.path
@@ -340,10 +392,18 @@ pub fn comic_open(state: State<'_, AppState>, id: i64) -> CmdResult<ComicSession
         let conn = state.conn.lock().map_err(s)?;
         let b = db::require_book(&conn, id).map_err(s)?;
         let dir = b.reading_direction.clone().unwrap_or_else(|| "ltr".into());
-        (b.path, b.title, db::get_locator(&conn, id).map_err(s)?, dir, b.series)
+        (
+            b.path,
+            b.title,
+            db::get_locator(&conn, id).map_err(s)?,
+            dir,
+            b.series,
+        )
     };
     if !std::path::Path::new(&path).is_file() {
-        return Err(format!("The file is no longer at {path}. Rescan your library."));
+        return Err(format!(
+            "The file is no longer at {path}. Rescan your library."
+        ));
     }
     let book = crate::comics::open(std::path::Path::new(&path)).map_err(|e| format!("{e:#}"))?;
     Ok(ComicSession {
@@ -391,7 +451,15 @@ pub fn add_annotation(
 ) -> CmdResult<Annotation> {
     let conn = state.conn.lock().map_err(s)?;
     db::add_annotation(
-        &conn, book_id, spine, start_off, end_off, &kind, &color, &text, now_ts(),
+        &conn,
+        book_id,
+        spine,
+        start_off,
+        end_off,
+        &kind,
+        &color,
+        &text,
+        now_ts(),
     )
     .map_err(s)
 }
@@ -430,7 +498,10 @@ pub fn open_book(state: State<'_, AppState>, id: i64) -> CmdResult<Book> {
     }
 
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| {
-        format!("Couldn't open {}: {e}. Is a {} reader installed?", book.filename, book.format)
+        format!(
+            "Couldn't open {}: {e}. Is a {} reader installed?",
+            book.filename, book.format
+        )
     })?;
 
     db::mark_opened(&conn, id, now_ts()).map_err(s)?;
@@ -459,7 +530,9 @@ pub async fn search_metadata(
     query: String,
 ) -> CmdResult<Vec<MetaCandidate>> {
     let http = state.http.clone();
-    metadata::search(&http, &query).await.map_err(|e| format!("{e:#}"))
+    metadata::search(&http, &query)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -479,7 +552,12 @@ pub async fn apply_metadata(
     let http = state.http.clone();
 
     // Fill a description only when the book doesn't already have one.
-    let description = if book.description.as_deref().map(|d| d.is_empty()).unwrap_or(true) {
+    let description = if book
+        .description
+        .as_deref()
+        .map(|d| d.is_empty())
+        .unwrap_or(true)
+    {
         match &candidate.work_key {
             Some(k) => metadata::fetch_description(&http, k).await,
             None => None,

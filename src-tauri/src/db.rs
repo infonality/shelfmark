@@ -3,20 +3,31 @@
 //! a Mutex in app state; every function here takes `&Connection`.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
 
-use crate::models::{Annotation, Book, BookEdit, CategoryStat, DashboardStats, Settings};
+use crate::models::{
+    Annotation, Book, BookEdit, CategoryCount, CategoryStat, DashboardStats, LibraryPage,
+    LibraryQuery, Settings, StatusCounts,
+};
 
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
+    let conn = connect(path)?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+/// Open an already-migrated database for a background operation. WAL lets the
+/// scanner write through this connection while ordinary UI reads use the main
+/// connection instead of waiting behind one long mutex guard.
+pub fn connect(path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;",
     )?;
-    migrate(&conn)?;
     Ok(conn)
 }
 
@@ -98,7 +109,33 @@ fn migrate(conn: &Connection) -> Result<()> {
     // so itself, which is why this is a choice rather than a detection.
     add_column(conn, "books", "reading_direction", "TEXT")?;
     add_column(conn, "books", "tags", "TEXT")?;
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_books_kind ON books(kind);")?;
+    // Used by the incremental scanner. Existing rows start at zero, which
+    // deliberately causes one full scan after this migration and fast skips
+    // from then on.
+    add_column(
+        conn,
+        "books",
+        "file_modified_ms",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_books_kind ON books(kind);
+         CREATE INDEX IF NOT EXISTS idx_books_kind_status ON books(kind, status);
+         CREATE INDEX IF NOT EXISTS idx_books_kind_title ON books(kind, title COLLATE NOCASE);
+         CREATE TABLE IF NOT EXISTS tags (
+             id       INTEGER PRIMARY KEY,
+             name     TEXT NOT NULL,
+             name_key TEXT NOT NULL UNIQUE COLLATE NOCASE
+         );
+         CREATE TABLE IF NOT EXISTS book_tags (
+             book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+             tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+             PRIMARY KEY(book_id, tag_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_book_tags_tag ON book_tags(tag_id, book_id);",
+    )?;
+    backfill_book_tags(conn)?;
+    ensure_search_index(conn)?;
     Ok(())
 }
 
@@ -113,6 +150,108 @@ fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Resul
     drop(stmt);
     if !exists {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
+}
+
+fn normalized_tags(value: Option<&str>) -> Vec<(String, String)> {
+    let mut tags = std::collections::BTreeMap::<String, String>::new();
+    for raw in value.unwrap_or_default().split(',') {
+        let name = raw.trim();
+        if !name.is_empty() {
+            tags.entry(name.to_lowercase())
+                .or_insert_with(|| name.to_string());
+        }
+    }
+    tags.into_iter().collect()
+}
+
+fn sync_book_tags(conn: &Connection, book_id: i64, value: Option<&str>) -> Result<()> {
+    conn.execute("DELETE FROM book_tags WHERE book_id=?1", [book_id])?;
+    for (key, name) in normalized_tags(value) {
+        conn.execute(
+            "INSERT INTO tags(name, name_key) VALUES(?1, ?2)
+             ON CONFLICT(name_key) DO NOTHING",
+            params![name, key],
+        )?;
+        let tag_id: i64 = conn.query_row(
+            "SELECT id FROM tags WHERE name_key=?1 COLLATE NOCASE",
+            [key],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO book_tags(book_id, tag_id) VALUES(?1, ?2)",
+            params![book_id, tag_id],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM book_tags)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn backfill_book_tags(conn: &Connection) -> Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT id, tags FROM books WHERE tags IS NOT NULL AND tags <> ''")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    for (id, tags) in rows {
+        // Existing associations make this cheap and preserve the display case
+        // of the first spelling seen for a collection.
+        if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM book_tags WHERE book_id=?1)",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )? == 0
+        {
+            sync_book_tags(conn, id, tags.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_search_index(conn: &Connection) -> Result<()> {
+    let existed = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_fts'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    // Bundled SQLite normally includes FTS5. If a platform build does not, the
+    // library query transparently falls back to LIKE below.
+    if conn
+        .execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+                 title, author, series, tags, content='books', content_rowid='id'
+             );
+             CREATE TRIGGER IF NOT EXISTS books_fts_ai AFTER INSERT ON books BEGIN
+                 INSERT INTO books_fts(rowid,title,author,series,tags)
+                 VALUES(new.id,new.title,new.author,new.series,new.tags);
+             END;
+             CREATE TRIGGER IF NOT EXISTS books_fts_ad AFTER DELETE ON books BEGIN
+                 INSERT INTO books_fts(books_fts,rowid,title,author,series,tags)
+                 VALUES('delete',old.id,old.title,old.author,old.series,old.tags);
+             END;
+             CREATE TRIGGER IF NOT EXISTS books_fts_au AFTER UPDATE OF title,author,series,tags ON books BEGIN
+                 INSERT INTO books_fts(books_fts,rowid,title,author,series,tags)
+                 VALUES('delete',old.id,old.title,old.author,old.series,old.tags);
+                 INSERT INTO books_fts(rowid,title,author,series,tags)
+                 VALUES(new.id,new.title,new.author,new.series,new.tags);
+             END;",
+        )
+        .is_err()
+    {
+        return Ok(());
+    }
+    if !existed {
+        conn.execute("INSERT INTO books_fts(books_fts) VALUES('rebuild')", [])?;
     }
     Ok(())
 }
@@ -143,14 +282,22 @@ pub fn load_settings(conn: &Connection) -> Result<Settings> {
     Ok(Settings {
         books_root: g("books_root"),
         comics_root: g("comics_root"),
-        words_per_page: if words_per_page > 0 { words_per_page } else { 275 },
+        words_per_page: if words_per_page > 0 {
+            words_per_page
+        } else {
+            275
+        },
     })
 }
 
 pub fn save_settings(conn: &Connection, s: &Settings) -> Result<()> {
     set_setting(conn, "books_root", &s.books_root)?;
     set_setting(conn, "comics_root", &s.comics_root)?;
-    let wpp = if s.words_per_page > 0 { s.words_per_page } else { 275 };
+    let wpp = if s.words_per_page > 0 {
+        s.words_per_page
+    } else {
+        275
+    };
     set_setting(conn, "words_per_page", &wpp.to_string())?;
     Ok(())
 }
@@ -206,6 +353,7 @@ pub struct ScannedBook {
     pub filename: String,
     pub format: String,
     pub size: i64,
+    pub file_modified_ms: i64,
     pub title: String,
     pub author: Option<String>,
     pub series: Option<String>,
@@ -225,18 +373,40 @@ pub struct ScannedBook {
     pub kind: String,
 }
 
+/// Stored filesystem signature used to avoid reopening an unchanged book.
+pub fn scan_fingerprint(conn: &Connection, path: &str) -> Result<Option<(i64, i64, String)>> {
+    conn.query_row(
+        "SELECT size, file_modified_ms, kind FROM books WHERE path=?1",
+        [path],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_scanned_kind(conn: &Connection, path: &str, kind: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE books SET kind=?2 WHERE path=?1 AND kind<>?2",
+        params![path, kind],
+    )?;
+    Ok(())
+}
+
 /// Insert a newly-scanned book. If the path already exists, refresh only the
 /// file-derived fields, preserving any user edits / fetched metadata / reading
 /// state. Returns (id, inserted).
 pub fn upsert_scanned(conn: &Connection, b: &ScannedBook, now: i64) -> Result<(i64, bool)> {
     let existing: Option<i64> = conn
-        .query_row("SELECT id FROM books WHERE path = ?1", [&b.path], |r| r.get(0))
+        .query_row("SELECT id FROM books WHERE path = ?1", [&b.path], |r| {
+            r.get(0)
+        })
         .optional()?;
     if let Some(id) = existing {
         // Keep it simple: only refresh size + filename so the row tracks the file.
         conn.execute(
-            "UPDATE books SET filename=?2, size=?3, kind=?4, updated_at=?5 WHERE id=?1",
-            params![id, b.filename, b.size, b.kind, now],
+            "UPDATE books SET filename=?2, size=?3, kind=?4, file_modified_ms=?5, updated_at=?6
+             WHERE id=?1",
+            params![id, b.filename, b.size, b.kind, b.file_modified_ms, now],
         )?;
         Ok((id, false))
     } else {
@@ -244,12 +414,13 @@ pub fn upsert_scanned(conn: &Connection, b: &ScannedBook, now: i64) -> Result<(i
             "INSERT INTO books(
                 path, filename, format, size, title, author, series, publisher, published_date,
                 language, isbn, description, subjects, cover_path, pages, words,
-                words_estimated, meta_status, kind, added_at, updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?20)",
+                words_estimated, meta_status, kind, file_modified_ms, added_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?21)",
             params![
                 b.path, b.filename, b.format, b.size, b.title, b.author, b.series, b.publisher,
                 b.published_date, b.language, b.isbn, b.description, b.subjects, b.cover_path,
-                b.pages, b.words, b.words_estimated as i64, b.meta_status, b.kind, now
+                b.pages, b.words, b.words_estimated as i64, b.meta_status, b.kind,
+                b.file_modified_ms, now
             ],
         )?;
         Ok((conn.last_insert_rowid(), true))
@@ -260,7 +431,10 @@ pub fn upsert_scanned(conn: &Connection, b: &ScannedBook, now: i64) -> Result<(i
 /// the paths seen during the current scan.
 pub fn delete_missing(conn: &Connection, live_paths: &[String]) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute("CREATE TEMP TABLE IF NOT EXISTS live_paths(p TEXT PRIMARY KEY)", [])?;
+    tx.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS live_paths(p TEXT PRIMARY KEY)",
+        [],
+    )?;
     tx.execute("DELETE FROM live_paths", [])?;
     {
         let mut stmt = tx.prepare("INSERT OR IGNORE INTO live_paths(p) VALUES(?1)")?;
@@ -292,6 +466,148 @@ pub fn list_books(conn: &Connection) -> Result<Vec<Book>> {
     Ok(rows)
 }
 
+fn search_terms(value: &str) -> Option<String> {
+    let terms = value
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\"{}\"*", s.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" AND "))
+}
+
+fn has_fts(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_fts')",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        != 0
+}
+
+fn collection_filter(tag: Option<&str>, clauses: &mut Vec<String>, values: &mut Vec<Value>) {
+    if let Some(tag) = tag.map(str::trim).filter(|s| !s.is_empty()) {
+        clauses.push(
+            "EXISTS(SELECT 1 FROM book_tags bt JOIN tags t ON t.id=bt.tag_id
+                    WHERE bt.book_id=b.id AND t.name_key=? COLLATE NOCASE)"
+                .into(),
+        );
+        values.push(Value::Text(tag.to_lowercase()));
+    }
+}
+
+/// A bounded library page with server-side filtering, sorting and search.
+/// Full descriptions are still returned for the visible page so opening the
+/// detail drawer is immediate; records outside it never cross the IPC bridge.
+pub fn query_library(conn: &Connection, q: &LibraryQuery) -> Result<LibraryPage> {
+    let kind = if q.kind == "comic" { "comic" } else { "book" };
+    let mut clauses = vec!["b.kind=?".to_string()];
+    let mut values = vec![Value::Text(kind.to_string())];
+    collection_filter(q.tag.as_deref(), &mut clauses, &mut values);
+    if let Some(status) = q.status.as_deref().filter(|s| *s != "all" && !s.is_empty()) {
+        clauses.push("b.status=?".into());
+        values.push(Value::Text(status.to_string()));
+    }
+    if let Some(category) = q
+        .category
+        .as_deref()
+        .filter(|s| *s != "all" && !s.is_empty())
+    {
+        if category == "Uncategorized" {
+            clauses.push("(b.category IS NULL OR trim(b.category)='')".into());
+        } else {
+            clauses.push("b.category=?".into());
+            values.push(Value::Text(category.to_string()));
+        }
+    }
+    if let Some(search) = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(terms) = search_terms(search).filter(|_| has_fts(conn)) {
+            clauses.push(
+                "EXISTS(SELECT 1 FROM books_fts WHERE rowid=b.id AND books_fts MATCH ?)".into(),
+            );
+            values.push(Value::Text(terms));
+        } else {
+            clauses.push(
+                "lower(coalesce(b.title,'') || ' ' || coalesce(b.author,'') || ' ' ||
+                       coalesce(b.series,'') || ' ' || coalesce(b.tags,'')) LIKE ?"
+                    .into(),
+            );
+            values.push(Value::Text(format!("%{}%", search.to_lowercase())));
+        }
+    }
+    let where_sql = clauses.join(" AND ");
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM books b WHERE {where_sql}"),
+        params_from_iter(values.iter()),
+        |r| r.get(0),
+    )?;
+    let order = match q.sort.as_str() {
+        "author" => "coalesce(b.author,'') COLLATE NOCASE",
+        "category" => "coalesce(b.category,'') COLLATE NOCASE",
+        "status" => "b.status",
+        "progress" => "CASE WHEN b.status='finished' THEN 100 WHEN b.pages>0 THEN (b.current_page*100/b.pages) ELSE 0 END",
+        "rating" => "coalesce(b.rating,-1)",
+        "pages" => "coalesce(b.pages,-1)",
+        _ => "b.title COLLATE NOCASE",
+    };
+    let direction = if q.descending { "DESC" } else { "ASC" };
+    let limit = q.limit.clamp(1, 250);
+    let offset = q.offset.max(0);
+    let mut page_values = values.clone();
+    page_values.push(Value::Integer(limit));
+    page_values.push(Value::Integer(offset));
+    let sql = format!(
+        "SELECT {BOOK_COLS} FROM books b WHERE {where_sql}
+         ORDER BY {order} {direction}, b.title COLLATE NOCASE ASC LIMIT ? OFFSET ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let books = stmt
+        .query_map(params_from_iter(page_values.iter()), row_to_book)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut base_clauses = vec!["b.kind=?".to_string()];
+    let mut base_values = vec![Value::Text(kind.to_string())];
+    collection_filter(q.tag.as_deref(), &mut base_clauses, &mut base_values);
+    let base_where = base_clauses.join(" AND ");
+    let counts = conn.query_row(
+        &format!(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN b.status='unread' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN b.status='reading' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN b.status='finished' THEN 1 ELSE 0 END)
+             FROM books b WHERE {base_where}"
+        ),
+        params_from_iter(base_values.iter()),
+        |r| {
+            Ok(StatusCounts {
+                all: r.get(0)?,
+                unread: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                reading: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                finished: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            })
+        },
+    )?;
+    let mut category_stmt = conn.prepare(&format!(
+        "SELECT COALESCE(NULLIF(trim(b.category),''),'Uncategorized'), COUNT(*)
+         FROM books b WHERE {base_where}
+         GROUP BY 1 ORDER BY 1 COLLATE NOCASE"
+    ))?;
+    let categories = category_stmt
+        .query_map(params_from_iter(base_values.iter()), |r| {
+            Ok(CategoryCount {
+                name: r.get(0)?,
+                total: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(LibraryPage {
+        books,
+        total,
+        counts,
+        categories,
+    })
+}
+
 /// Distinct non-empty categories currently in use.
 pub fn list_categories(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
@@ -308,26 +624,29 @@ pub fn list_categories(conn: &Connection) -> Result<Vec<String>> {
 /// Distinct comma-separated tags currently assigned to books.
 pub fn list_tags(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT tags FROM books WHERE kind='book' AND tags IS NOT NULL AND tags <> ''",
+        "SELECT t.name FROM tags t
+         WHERE EXISTS(
+             SELECT 1 FROM book_tags bt JOIN books b ON b.id=bt.book_id
+             WHERE bt.tag_id=t.id AND b.kind='book'
+         )
+         ORDER BY t.name COLLATE NOCASE",
     )?;
-    let values = stmt
+    let tags = stmt
         .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut tags = std::collections::BTreeMap::<String, String>::new();
-    for value in values {
-        for raw in value.split(',') {
-            let tag = raw.trim();
-            if !tag.is_empty() {
-                tags.entry(tag.to_lowercase()).or_insert_with(|| tag.to_string());
-            }
-        }
-    }
-    Ok(tags.into_values().collect())
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+    Ok(tags)
 }
 
 /// Apply user-edited bibliographic fields. Marks metadata as manual and, when a
 /// page count is present but words are missing, fills a word estimate.
-pub fn update_book(conn: &Connection, id: i64, e: &BookEdit, words_per_page: i64, now: i64) -> Result<()> {
+pub fn update_book(
+    conn: &Connection,
+    id: i64,
+    e: &BookEdit,
+    words_per_page: i64,
+    now: i64,
+) -> Result<()> {
     // Derive an estimate only when the user gave pages but left words blank.
     let (words, words_estimated) = match (e.words, e.pages) {
         (Some(w), _) => (Some(w), false),
@@ -341,11 +660,25 @@ pub fn update_book(conn: &Connection, id: i64, e: &BookEdit, words_per_page: i64
             words_estimated=?15, meta_status='manual', updated_at=?16
          WHERE id=?1",
         params![
-            id, e.title, e.author, e.series, e.publisher, e.published_date, e.language,
-            e.isbn, e.description, e.category, e.subjects, e.tags, e.pages, words,
-            words_estimated as i64, now
+            id,
+            e.title,
+            e.author,
+            e.series,
+            e.publisher,
+            e.published_date,
+            e.language,
+            e.isbn,
+            e.description,
+            e.category,
+            e.subjects,
+            e.tags,
+            e.pages,
+            words,
+            words_estimated as i64,
+            now
         ],
     )?;
+    sync_book_tags(conn, id, e.tags.as_deref())?;
     Ok(())
 }
 
@@ -394,7 +727,11 @@ pub fn set_progress(conn: &Connection, id: i64, current_page: i64, now: i64) -> 
         return Ok(());
     }
     let started = book.started_at.unwrap_or(now);
-    let status = if cp > 0 { "reading".to_string() } else { book.status.clone() };
+    let status = if cp > 0 {
+        "reading".to_string()
+    } else {
+        book.status.clone()
+    };
     conn.execute(
         "UPDATE books SET current_page=?2, status=?3, started_at=?4, updated_at=?5 WHERE id=?1",
         params![id, cp, status, started, now],
@@ -422,7 +759,13 @@ pub fn mark_opened(conn: &Connection, id: i64, now: i64) -> Result<()> {
 /// Remember where the built-in reader left off. `locator` is opaque JSON so the
 /// reader can evolve its position format without another migration; `percent`
 /// feeds the existing page-based progress so the dashboard keeps working.
-pub fn save_locator(conn: &Connection, id: i64, locator: &str, percent: f64, now: i64) -> Result<()> {
+pub fn save_locator(
+    conn: &Connection,
+    id: i64,
+    locator: &str,
+    percent: f64,
+    now: i64,
+) -> Result<()> {
     let book = get_book(conn, id)?.ok_or_else(|| anyhow::anyhow!("Book not found"))?;
     let pages = book.pages.unwrap_or(0);
     let page = if pages > 0 {
@@ -439,7 +782,11 @@ pub fn save_locator(conn: &Connection, id: i64, locator: &str, percent: f64, now
         return set_status(conn, id, "finished", now);
     }
     let started = book.started_at.unwrap_or(now);
-    let status = if book.status == "unread" { "reading" } else { &book.status };
+    let status = if book.status == "unread" {
+        "reading"
+    } else {
+        &book.status
+    };
     conn.execute(
         "UPDATE books SET locator=?2, current_page=?3, status=?4, started_at=?5, updated_at=?6
          WHERE id=?1",
@@ -515,8 +862,19 @@ pub fn apply_metadata(
             meta_status='fetched', meta_source='Open Library', updated_at=?13
          WHERE id=?1",
         params![
-            id, title, author, publisher, published_date, isbn, subjects, description,
-            pages, words, words_estimated as i64, cover_path, now
+            id,
+            title,
+            author,
+            publisher,
+            published_date,
+            isbn,
+            subjects,
+            description,
+            pages,
+            words,
+            words_estimated as i64,
+            cover_path,
+            now
         ],
     )?;
     Ok(())
@@ -602,20 +960,92 @@ mod tests {
     fn tag_migration_round_trips_and_lists_collections() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+        // Recreate the 0.5.25 shape: tags existed only as comma-separated text.
+        conn.execute_batch(
+            "DROP TRIGGER books_fts_ai;
+             DROP TRIGGER books_fts_ad;
+             DROP TRIGGER books_fts_au;
+             DROP TABLE books_fts;
+             DROP TABLE book_tags;
+             DROP TABLE tags;",
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO books(path, filename, format, size, title, tags, kind)
              VALUES('one.epub','one.epub','epub',1,'One','Research, Favorites','book')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO books(path, filename, format, size, title, tags, kind)
              VALUES('two.epub','two.epub','epub',1,'Two','favorites, Work','book')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
 
         let book = get_book(&conn, 1).unwrap().unwrap();
         assert_eq!(book.tags.as_deref(), Some("Research, Favorites"));
-        assert_eq!(list_tags(&conn).unwrap(), vec!["Favorites", "Research", "Work"]);
+        assert_eq!(
+            list_tags(&conn).unwrap(),
+            vec!["Favorites", "Research", "Work"]
+        );
+    }
+
+    #[test]
+    fn paged_library_filters_with_fts_and_normalized_tags() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for i in 0..300 {
+            conn.execute(
+                "INSERT INTO books(path,filename,format,size,title,author,tags,kind,status,category)
+                 VALUES(?1,?2,'epub',1,?3,?4,?5,'book',?6,?7)",
+                params![
+                    format!("{i}.epub"),
+                    format!("{i}.epub"),
+                    format!("Scale Book {i:03}"),
+                    format!("Author {}", i % 20),
+                    if i % 2 == 0 { "Research, Large Library" } else { "Other" },
+                    if i % 3 == 0 { "finished" } else { "unread" },
+                    if i % 5 == 0 { "Reference" } else { "Fiction" },
+                ],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            sync_book_tags(
+                &conn,
+                id,
+                Some(if i % 2 == 0 {
+                    "Research, Large Library"
+                } else {
+                    "Other"
+                }),
+            )
+            .unwrap();
+        }
+        let page = query_library(
+            &conn,
+            &LibraryQuery {
+                kind: "book".into(),
+                status: Some("finished".into()),
+                category: Some("Reference".into()),
+                tag: Some("research".into()),
+                search: Some("Scale Book".into()),
+                sort: "title".into(),
+                descending: true,
+                offset: 0,
+                limit: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.books.len(), 7);
+        assert_eq!(page.total, 10);
+        assert_eq!(page.counts.all, 150);
+        assert!(page.books[0].title > page.books[1].title);
+        assert!(page
+            .categories
+            .iter()
+            .any(|c| c.name == "Reference" && c.total == 30));
     }
 }
 
@@ -627,9 +1057,7 @@ pub fn delete_book(conn: &Connection, id: i64) -> Result<()> {
 // ---------- dashboard ----------
 
 pub fn dashboard(conn: &Connection) -> Result<DashboardStats> {
-    let one = |sql: &str| -> Result<i64> {
-        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?)
-    };
+    let one = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?) };
 
     let books_read = one("SELECT COUNT(*) FROM books WHERE kind='book' AND status='finished'")?;
     let comics_read = one("SELECT COUNT(*) FROM books WHERE kind='comic' AND status='finished'")?;
@@ -641,8 +1069,9 @@ pub fn dashboard(conn: &Connection) -> Result<DashboardStats> {
 
     // Totals move only when something is finished — part-read pages don't
     // count, so the number never goes backwards or depends on a guess.
-    let pages_read =
-        one("SELECT COALESCE(SUM(pages),0) FROM books WHERE status='finished' AND pages IS NOT NULL")?;
+    let pages_read = one(
+        "SELECT COALESCE(SUM(pages),0) FROM books WHERE status='finished' AND pages IS NOT NULL",
+    )?;
 
     // Category rollup (books without a category grouped under "Uncategorized").
     let mut stmt = conn.prepare(
