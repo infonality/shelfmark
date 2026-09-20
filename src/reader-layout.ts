@@ -189,23 +189,14 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
       max-height:${contentH}px !important;
       box-sizing:border-box;
     }
-    /* A publisher may give a raster image both dimensions. Once either one is
-       capped to fit the page, retaining the other can distort the bitmap.
-       Width remains publisher-controlled; deriving height from it preserves
-       the intrinsic ratio without enlarging inline decorations. */
-    img { height:auto !important; }
+    /* Respect publisher dimensions such as a two-em imprint logo. When both
+       dimensions define a box, contain the bitmap inside it rather than
+       stretching its pixels to match the box's proportions. */
+    img { object-fit:contain; }
     img, svg, figure, table { break-inside:avoid; page-break-inside:avoid; }
     table { max-width:100% !important; table-layout:fixed; }
     pre { white-space:pre-wrap; word-wrap:break-word; }
     h1, h2, h3, h4 { break-after:avoid; text-align:left; hyphens:none; }
-    /* Internal EPUB links are often wrapped around whole headings, glossary
-       terms, and page markers. A forced border makes ordinary prose look
-       randomly underlined, so keep links unobtrusive like native book apps. */
-    a, a * {
-      color:inherit !important;
-      text-decoration:none !important;
-      border-bottom:0 !important;
-    }
     ::selection { background:rgba(120,110,255,.28); }
   `;
 
@@ -397,6 +388,20 @@ export function unprefixForeignMarkup(html: string): string {
 }
 
 /**
+ * Make XHTML's self-closing anchors unambiguous to the forgiving HTML parser.
+ *
+ * In XHTML `<a id="page-12"/>` is an empty page marker. Parsed as HTML it is
+ * an opening tag, so the prose after it can accidentally become one enormous
+ * link. Closing only these anchor tags preserves the forgiving parser while
+ * preventing the random linked/blue passages that malformed that content.
+ */
+export function closeSelfClosingAnchors(html: string): string {
+  return html.replace(/<a\b(?:[^>"']|"[^"]*"|'[^']*')*\/\s*>/gi, (tag) =>
+    tag.replace(/\/\s*>$/, "></a>")
+  );
+}
+
+/**
  * Where the book's own files come from. Tauri maps a custom scheme onto an http
  * origin on Windows and serves it as a real scheme elsewhere, so both spellings
  * have to be allowed — see `resource_base` in `src-tauri/src/commands.rs`.
@@ -440,7 +445,8 @@ const CHAPTER_CSP = [
  */
 export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const base = `${resourceBase}${chapter.dir ? `${chapter.dir}/` : ""}`;
-  const doc = new DOMParser().parseFromString(unprefixForeignMarkup(chapter.html), "text/html");
+  const markup = closeSelfClosingAnchors(unprefixForeignMarkup(chapter.html));
+  const doc = new DOMParser().parseFromString(markup, "text/html");
 
   preserveImageAspectRatios(doc);
 
@@ -462,6 +468,7 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   defaults.textContent = `
     body { font-family:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif;
            -webkit-font-smoothing:antialiased; }
+    a { color:inherit; text-decoration:none; }
     p { margin:0 0 0.2em; text-indent:1.3em; }
     p:first-of-type, h1 + p, h2 + p, h3 + p, blockquote p { text-indent:0; }
     h1,h2,h3 { font-weight:600; letter-spacing:-0.01em; }
