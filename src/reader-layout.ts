@@ -184,8 +184,8 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
        would throw away the size the publisher chose and blow every inline
        decoration up to its natural pixel size, which is far too big for a
        figure meant to sit in a paragraph. */
-    img, svg, video, canvas {
-      max-width:100% !important;
+    img, svg, video, canvas, [data-bv-page-media] {
+      max-width:${column}px !important;
       max-height:${contentH}px !important;
       box-sizing:border-box;
     }
@@ -193,7 +193,36 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
        dimensions define a box, contain the bitmap inside it rather than
        stretching its pixels to match the box's proportions. */
     img { object-fit:contain; }
-    img, svg, figure, table { break-inside:avoid; page-break-inside:avoid; }
+    /* A publisher can opt a figure into column-span:all, float it across a
+       gutter, or put a viewport-wide box around it. Media and media-only
+       ancestors are marked before the chapter is serialized so every visual
+       participates in one column's flow as one indivisible unit. */
+    [data-bv-page-media], [data-bv-page-media-wrapper] {
+      column-span:none !important;
+      -webkit-column-span:none !important;
+      break-inside:avoid-column !important;
+      page-break-inside:avoid !important;
+      -webkit-column-break-inside:avoid !important;
+      float:none !important;
+      max-width:${column}px !important;
+      box-sizing:border-box !important;
+    }
+    [data-bv-page-media] {
+      position:static !important;
+      display:inline-block;
+      vertical-align:top;
+    }
+    [data-bv-page-media-wrapper] {
+      position:static !important;
+      width:auto !important;
+    }
+    [data-bv-empty-media-wrapper] { line-height:0 !important; }
+    /* Leave room for a normal multi-line caption so the image plus caption can
+       still fit the page as an unbroken figure. */
+    figure[data-bv-page-media-wrapper] [data-bv-page-media] {
+      max-height:calc(${contentH}px - 4rem) !important;
+    }
+    img, svg, figure, picture, table { break-inside:avoid; page-break-inside:avoid; }
     table { max-width:100% !important; table-layout:fixed; }
     pre { white-space:pre-wrap; word-wrap:break-word; }
     h1, h2, h3, h4 { break-after:avoid; text-align:left; hyphens:none; }
@@ -449,6 +478,7 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const doc = new DOMParser().parseFromString(markup, "text/html");
 
   preserveImageAspectRatios(doc);
+  markMediaForPagination(doc);
 
   // First in the head, before anything that could fetch or run. A book may
   // carry a policy of its own; a second one can only narrow this, never widen
@@ -500,4 +530,28 @@ export function preserveImageAspectRatios(doc: Document) {
       el.setAttribute("preserveAspectRatio", "xMidYMid meet");
     }
   });
+}
+
+/**
+ * Mark visual elements and their image-only wrappers for the pagination
+ * stylesheet. Applying the rule to the wrapper matters: EPUBs commonly put a
+ * cover or illustration inside a viewport-wide `<div>` or an anchor with
+ * `column-span:all`; constraining only the nested `<img>` leaves that outer box
+ * spanning both pages of a spread.
+ */
+export function markMediaForPagination(doc: Document) {
+  const media = Array.from(doc.querySelectorAll<HTMLElement>("img, svg, video, canvas"));
+  for (const element of media) {
+    element.setAttribute("data-bv-page-media", "");
+    let parent = element.parentElement;
+    for (let depth = 0; parent && parent !== doc.body && depth < 4; depth += 1) {
+      const tag = parent.tagName.toLowerCase();
+      const isFigure = tag === "figure" || tag === "picture";
+      const isEmptyWrapper = parent.textContent?.trim() === "";
+      if (!isFigure && !isEmptyWrapper) break;
+      parent.setAttribute("data-bv-page-media-wrapper", "");
+      if (isEmptyWrapper) parent.setAttribute("data-bv-empty-media-wrapper", "");
+      parent = parent.parentElement;
+    }
+  }
 }
