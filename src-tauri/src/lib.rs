@@ -96,6 +96,11 @@ pub fn run() {
             let covers_dir = data_dir.join("covers");
             std::fs::create_dir_all(&covers_dir).ok();
 
+            // Parser improvements should repair already-catalogued books too.
+            // Only missing EPUB covers are inspected, and only their package
+            // metadata + cover bytes are read.
+            scanner::backfill_missing_epub_covers(&conn, &covers_dir).ok();
+
             // In release bundles the per-OS PDFium library ships in the resource
             // dir; point the renderer at it (dev falls back to the working dir).
             if let Ok(resource_dir) = app.path().resource_dir() {

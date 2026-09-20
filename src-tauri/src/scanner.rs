@@ -182,6 +182,43 @@ pub fn scan(
     Ok(result)
 }
 
+/// Fill covers that an older EPUB parser could not discover. This is deliberately
+/// cover-only, so upgrading does not turn application startup into a full scan.
+pub fn backfill_missing_epub_covers(conn: &Connection, covers_dir: &Path) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, cover_path FROM books WHERE lower(format) = 'epub'",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut repaired = 0;
+    for (id, path, current) in rows {
+        if cover_is_usable(current.as_deref()) {
+            continue;
+        }
+        let Ok(Some(cover)) = crate::formats::epub::extract_cover(Path::new(&path)) else {
+            continue;
+        };
+        let Ok(cover_path) = covers::store_bytes(covers_dir, id, &cover.bytes, &cover.ext) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE books SET cover_path=?2 WHERE id=?1",
+            rusqlite::params![id, cover_path],
+        )?;
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
 /// Whether a stored cover file exists and is large enough to be a real image
 /// (some ebooks ship a tiny 1x1 spacer that we don't want to keep as a cover).
 fn cover_is_usable(cover_path: Option<&str>) -> bool {

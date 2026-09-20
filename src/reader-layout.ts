@@ -119,6 +119,8 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
   // The tallest a figure can be and still fit the page it starts on.
   const contentH = Math.max(80, h - pad - bottom);
 
+  preservePublisherFontScale(doc);
+
   // Tinted and dark pages override the book's colours; plain light ones leave
   // them alone. See `forceColors` in reader-prefs.
   const recolour = !t.forceColors
@@ -139,6 +141,7 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
     html {
       margin:0 !important; padding:0 !important;
       height:100% !important;
+      font-size:${prefs.size}px !important;
       overflow:hidden !important;
       /* Scroll anchoring would "helpfully" shift the page when a late image
          changes the layout, which reads as the text sliding sideways. */
@@ -163,7 +166,7 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
       overflow-anchor:none !important;
       overflow-wrap:break-word;
       background:${t.bg};
-      font-size:${prefs.size}px;
+      font-size:1rem;
       line-height:${prefs.lineHeight};
       text-align:${prefs.justify ? "justify" : "left"};
       hyphens:${prefs.justify ? "auto" : "manual"};
@@ -190,7 +193,14 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
     table { max-width:100% !important; table-layout:fixed; }
     pre { white-space:pre-wrap; word-wrap:break-word; }
     h1, h2, h3, h4 { break-after:avoid; text-align:left; hyphens:none; }
-    a { text-decoration:none; border-bottom:1px solid currentColor; }
+    /* Internal EPUB links are often wrapped around whole headings, glossary
+       terms, and page markers. A forced border makes ordinary prose look
+       randomly underlined, so keep links unobtrusive like native book apps. */
+    a, a * {
+      color:inherit !important;
+      text-decoration:none !important;
+      border-bottom:0 !important;
+    }
     ::selection { background:rgba(120,110,255,.28); }
   `;
 
@@ -209,6 +219,31 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
 
 const LAYOUT_STYLE_ID = "bv-layout";
 const VEIL_STYLE_ID = "bv-veil";
+const PUBLISHER_FONT_SCALE = "data-bv-font-scale";
+
+/**
+ * Turn the publisher's computed sizes into root-relative sizes once per
+ * chapter. EPUB styles frequently use absolute keywords such as `small`,
+ * which ignore a font size set on `body`; preserving the computed ratios as
+ * `rem` lets the reader's root size scale prose, headings and notes together.
+ */
+function preservePublisherFontScale(doc: Document) {
+  const root = doc.documentElement;
+  const view = doc.defaultView;
+  if (!view || root.hasAttribute(PUBLISHER_FONT_SCALE)) return;
+
+  const rootPx = Number.parseFloat(view.getComputedStyle(root).fontSize) || 16;
+  const elements = [doc.body, ...Array.from(doc.body.querySelectorAll<HTMLElement>("*"))];
+  const sizes = elements.map((el) => Number.parseFloat(view.getComputedStyle(el).fontSize));
+
+  root.setAttribute(PUBLISHER_FONT_SCALE, "");
+  elements.forEach((el, i) => {
+    const px = sizes[i];
+    if (Number.isFinite(px) && px > 0) {
+      el.style.setProperty("font-size", `${px / rootPx}rem`, "important");
+    }
+  });
+}
 
 /**
  * Show a page by translating the content, rather than scrolling to it.

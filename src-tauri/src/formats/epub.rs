@@ -68,17 +68,31 @@ pub fn extract(path: &std::path::Path) -> Result<ExtractedMeta> {
         meta.pages = Some(((words + WORDS_PER_PAGE - 1) / WORDS_PER_PAGE).max(1));
     }
 
-    // Cover image.
-    if let Some(href) = cover_href(&opf) {
-        let entry = resolve(&opf_dir, &href);
-        if let Ok(bytes) = read_entry_bytes(&mut zip, &entry) {
-            if !bytes.is_empty() {
-                meta.cover = Some(CoverImage { bytes, ext: image_ext(&href) });
-            }
-        }
-    }
+    meta.cover = read_cover(&mut zip, &opf, &opf_dir);
 
     Ok(meta)
+}
+
+/// Read only the embedded cover. Used to repair libraries scanned by an older
+/// parser without decompressing and counting every chapter again at startup.
+pub fn extract_cover(path: &std::path::Path) -> Result<Option<CoverImage>> {
+    let file = std::fs::File::open(path)?;
+    let mut zip = ZipArchive::new(std::io::BufReader::new(file)).context("open epub zip")?;
+    let opf_path = find_opf_path(&mut zip)?;
+    let opf_xml = read_entry_string(&mut zip, &opf_path)?;
+    let opf = parse_opf(&opf_xml);
+    Ok(read_cover(&mut zip, &opf, &parent_dir(&opf_path)))
+}
+
+fn read_cover(zip: &mut Archive, opf: &Opf, opf_dir: &str) -> Option<CoverImage> {
+    let href = cover_href(opf)?;
+    let entry = resolve(opf_dir, &href);
+    let bytes = read_entry_bytes(zip, &entry).ok()?;
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(CoverImage { bytes, ext: image_ext(&href) })
+    }
 }
 
 // ---------- OPF parsing ----------
@@ -121,24 +135,27 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                let name = e.name();
-                match name.as_ref() {
-                    b"dc:title" | b"title" => cur = Some("title"),
-                    b"dc:creator" | b"creator" => {
+                // XML namespace prefixes are arbitrary. Most EPUBs use a
+                // default OPF namespace, but valid packages may spell these
+                // as `<opf:item>` / `<opf:itemref>` instead. Match the local
+                // name so both forms describe the same package.
+                match e.local_name().as_ref() {
+                    b"title" => cur = Some("title"),
+                    b"creator" => {
                         if opf.author.is_none() {
                             cur = Some("author");
                         }
                     }
-                    b"dc:publisher" | b"publisher" => cur = Some("publisher"),
-                    b"dc:date" | b"date" => {
+                    b"publisher" => cur = Some("publisher"),
+                    b"date" => {
                         if opf.date.is_none() {
                             cur = Some("date");
                         }
                     }
-                    b"dc:language" | b"language" => cur = Some("language"),
-                    b"dc:description" | b"description" => cur = Some("description"),
-                    b"dc:subject" | b"subject" => cur = Some("subject"),
-                    b"dc:identifier" | b"identifier" => {
+                    b"language" => cur = Some("language"),
+                    b"description" => cur = Some("description"),
+                    b"subject" => cur = Some("subject"),
+                    b"identifier" => {
                         cur = Some("identifier");
                         ident_is_isbn = attr(&e, b"opf:scheme")
                             .or_else(|| attr(&e, b"scheme"))
@@ -156,7 +173,7 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
                 }
             }
             // Some producers emit manifest items / metas as self-closing tags.
-            Ok(Event::Empty(e)) => match e.name().as_ref() {
+            Ok(Event::Empty(e)) => match e.local_name().as_ref() {
                 b"item" => opf.manifest.push(read_manifest_item(&e)),
                 b"meta" => read_meta(&e, &mut opf),
                 b"itemref" => {
@@ -266,7 +283,7 @@ pub(crate) fn find_opf_path(zip: &mut Archive) -> Result<String> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"rootfile" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == b"rootfile" => {
                 if let Some(fp) = attr(&e, b"full-path") {
                     return Ok(fp);
                 }
@@ -358,4 +375,79 @@ fn image_ext(href: &str) -> String {
         }
     }
     "jpg".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    #[test]
+    fn parses_namespace_prefixed_opf_manifest_and_spine() {
+        let xml = r#"<?xml version="1.0"?>
+            <opf:package xmlns:opf="http://www.idpf.org/2007/opf"
+                         xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <opf:metadata>
+                <dc:title>Prefixed Book</dc:title>
+                <dc:creator>An Author</dc:creator>
+              </opf:metadata>
+              <opf:manifest>
+                <opf:item id="chapter" href="Text/chapter.xhtml"
+                          media-type="application/xhtml+xml"/>
+                <opf:item id="cover" href="Images/cover.jpg"
+                          media-type="image/jpeg" properties="cover-image"/>
+              </opf:manifest>
+              <opf:spine>
+                <opf:itemref idref="chapter"/>
+              </opf:spine>
+            </opf:package>"#;
+
+        let opf = parse_opf(xml);
+        assert_eq!(opf.title.as_deref(), Some("Prefixed Book"));
+        assert_eq!(opf.author.as_deref(), Some("An Author"));
+        assert_eq!(opf.manifest.len(), 2);
+        assert_eq!(opf.manifest[0].href, "Text/chapter.xhtml");
+        assert_eq!(opf.spine, ["chapter"]);
+        assert_eq!(cover_href(&opf).as_deref(), Some("Images/cover.jpg"));
+    }
+
+    #[test]
+    fn extracts_cover_from_namespace_prefixed_package() {
+        let path = std::env::temp_dir().join(format!(
+            "shelfmark_prefixed_cover_{}.epub",
+            std::process::id()
+        ));
+        let mut zip = ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", deflated).unwrap();
+        zip.write_all(
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/content.opf", deflated).unwrap();
+        zip.write_all(
+            br#"<opf:package xmlns:opf="http://www.idpf.org/2007/opf">
+              <opf:manifest>
+                <opf:item id="cover" href="Images/cover.jpg" media-type="image/jpeg"
+                          properties="cover-image"/>
+              </opf:manifest>
+              <opf:spine/>
+            </opf:package>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Images/cover.jpg", deflated).unwrap();
+        zip.write_all(b"cover bytes").unwrap();
+        zip.finish().unwrap();
+
+        let cover = extract_cover(&path).unwrap().expect("cover should be found");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cover.ext, "jpg");
+        assert_eq!(cover.bytes, b"cover bytes");
+    }
 }
