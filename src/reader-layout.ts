@@ -189,6 +189,11 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
       max-height:${contentH}px !important;
       box-sizing:border-box;
     }
+    /* A publisher may give a raster image both dimensions. Once either one is
+       capped to fit the page, retaining the other can distort the bitmap.
+       Width remains publisher-controlled; deriving height from it preserves
+       the intrinsic ratio without enlarging inline decorations. */
+    img { height:auto !important; }
     img, svg, figure, table { break-inside:avoid; page-break-inside:avoid; }
     table { max-width:100% !important; table-layout:fixed; }
     pre { white-space:pre-wrap; word-wrap:break-word; }
@@ -437,6 +442,8 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const base = `${resourceBase}${chapter.dir ? `${chapter.dir}/` : ""}`;
   const doc = new DOMParser().parseFromString(unprefixForeignMarkup(chapter.html), "text/html");
 
+  preserveImageAspectRatios(doc);
+
   // First in the head, before anything that could fetch or run. A book may
   // carry a policy of its own; a second one can only narrow this, never widen
   // it, so arriving first is all the precedence needed.
@@ -468,4 +475,22 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   doc.head.appendChild(veil);
 
   return `<!doctype html>${doc.documentElement.outerHTML}`;
+}
+
+/**
+ * Refuse the SVG opt-out that stretches artwork to the viewport.
+ *
+ * EPUB cover pages commonly wrap a bitmap in an SVG sized to 100% by 100%.
+ * `preserveAspectRatio="none"` then deforms that bitmap whenever the reader
+ * and cover have different proportions. `meet` keeps the whole image visible
+ * and centres any spare space. The same rule applies to nested SVG `<image>`
+ * elements, where `none` would distort the bitmap inside an otherwise
+ * correctly proportioned SVG.
+ */
+export function preserveImageAspectRatios(doc: Document) {
+  doc.querySelectorAll("svg, image").forEach((el) => {
+    if (el.getAttribute("preserveAspectRatio")?.trim().toLowerCase() === "none") {
+      el.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    }
+  });
 }
