@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::Serialize;
+use sha1::{Digest, Sha1};
 use std::path::Path;
 use zip::ZipArchive;
 
@@ -238,8 +239,95 @@ pub fn resource(path: &Path, entry: &str) -> Result<(Vec<u8>, String)> {
     let mut zip = open_zip(path)?;
     // `resolve` collapses `.` and `..`, so a crafted href can't climb out.
     let clean = resolve("", entry);
-    let bytes = read_entry_bytes(&mut zip, &clean)?;
+    let mut bytes = read_entry_bytes(&mut zip, &clean)?;
+    maybe_deobfuscate_font(&mut zip, &clean, &mut bytes)?;
     Ok((bytes, mime_for(&clean)))
+}
+
+/// EPUB permits embedded fonts to be lightly obfuscated so the font file is
+/// tied to this publication. Browsers cannot consume those bytes directly;
+/// reading systems reverse the XOR before serving the font to their renderer.
+fn maybe_deobfuscate_font(zip: &mut Archive, entry: &str, bytes: &mut [u8]) -> Result<()> {
+    let lower = entry.to_ascii_lowercase();
+    if ![".otf", ".ttf", ".woff", ".woff2"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return Ok(());
+    }
+
+    let Ok(encryption_xml) = read_entry_string(zip, "META-INF/encryption.xml") else {
+        return Ok(());
+    };
+    let protected = idpf_obfuscated_entries(&encryption_xml);
+    if !protected.iter().any(|path| norm(path) == norm(entry)) {
+        return Ok(());
+    }
+
+    let opf_path = find_opf_path(zip)?;
+    let opf = parse_opf(&read_entry_string(zip, &opf_path)?);
+    let identifier = opf
+        .unique_identifier
+        .as_deref()
+        .ok_or_else(|| anyhow!("obfuscated font has no publication identifier"))?;
+    apply_idpf_obfuscation(bytes, identifier);
+    Ok(())
+}
+
+/// Resources protected with the standard IDPF embedding algorithm.
+fn idpf_obfuscated_entries(xml: &str) -> Vec<String> {
+    const IDPF: &str = "http://www.idpf.org/2008/embedding";
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut in_resource = false;
+    let mut is_idpf = false;
+    let mut uri: Option<String> = None;
+    let mut out = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"EncryptedData" => {
+                in_resource = true;
+                is_idpf = false;
+                uri = None;
+            }
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if in_resource => {
+                match e.local_name().as_ref() {
+                    b"EncryptionMethod" => {
+                        is_idpf = attr(&e, b"Algorithm").as_deref() == Some(IDPF)
+                    }
+                    b"CipherReference" => uri = attr(&e, b"URI"),
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"EncryptedData" => {
+                if is_idpf {
+                    if let Some(path) = uri.take() {
+                        out.push(resolve("", &path));
+                    }
+                }
+                in_resource = false;
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// The IDPF algorithm removes XML whitespace from the package identifier,
+/// hashes it with SHA-1, and repeats that 20-byte key over the first 1040 bytes.
+/// XOR is symmetric, so the same operation obfuscates and restores a font.
+fn apply_idpf_obfuscation(bytes: &mut [u8], identifier: &str) {
+    let normalized: String = identifier
+        .chars()
+        .filter(|c| !matches!(*c, ' ' | '\t' | '\r' | '\n'))
+        .collect();
+    let key = Sha1::digest(normalized.as_bytes());
+    for (index, byte) in bytes.iter_mut().take(1040).enumerate() {
+        *byte ^= key[index % key.len()];
+    }
 }
 
 pub fn mime_for(path: &str) -> String {
@@ -624,6 +712,9 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
 
     #[test]
     fn strips_scripts_and_handlers() {
@@ -697,5 +788,83 @@ mod tests {
         // `resolve` collapses traversal before the name ever reaches the zip.
         assert_eq!(resolve("", "../../etc/passwd"), "etc/passwd");
         assert_eq!(resolve("", "OEBPS/../../secret"), "secret");
+    }
+
+    #[test]
+    fn restores_idpf_obfuscated_font_bytes() {
+        let identifier = " urn:uuid:76571D94-E513-4D43-A279-E369313F5A0E\n";
+        let mut font = b"OTTO font payload used for a deterministic round trip".to_vec();
+        let original = font.clone();
+
+        apply_idpf_obfuscation(&mut font, identifier);
+        assert_ne!(&font[..4], b"OTTO");
+        apply_idpf_obfuscation(&mut font, identifier);
+        assert_eq!(font, original);
+    }
+
+    #[test]
+    fn finds_only_idpf_obfuscated_resources() {
+        let xml = r#"<encryption xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+          <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/font/book.otf"/></enc:CipherData>
+          </enc:EncryptedData>
+          <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="urn:unsupported"/>
+            <enc:CipherData><enc:CipherReference URI="secret.bin"/></enc:CipherData>
+          </enc:EncryptedData>
+        </encryption>"#;
+        assert_eq!(idpf_obfuscated_entries(xml), ["OEBPS/font/book.otf"]);
+    }
+
+    #[test]
+    fn serves_a_deobfuscated_font_from_an_epub() {
+        let identifier = "urn:uuid:76571D94-E513-4D43-A279-E369313F5A0E";
+        let original = b"OTTO font payload that a browser can recognize".to_vec();
+        let mut protected = original.clone();
+        apply_idpf_obfuscation(&mut protected, identifier);
+
+        let path = std::env::temp_dir().join(format!(
+            "shelfmark_obfuscated_font_{}.epub",
+            std::process::id()
+        ));
+        let mut zip = ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", deflated).unwrap();
+        zip.write_all(
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+        )
+        .unwrap();
+        zip.start_file("META-INF/encryption.xml", deflated).unwrap();
+        zip.write_all(
+            br#"<encryption xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+              <enc:EncryptedData>
+                <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+                <enc:CipherData><enc:CipherReference URI="OEBPS/font/book.otf"/></enc:CipherData>
+              </enc:EncryptedData>
+            </encryption>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/content.opf", deflated).unwrap();
+        zip.write_all(
+            format!(
+                r#"<package unique-identifier="bookid" xmlns:dc="http://purl.org/dc/elements/1.1/">
+                  <metadata><dc:identifier id="bookid">{identifier}</dc:identifier></metadata>
+                </package>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file("OEBPS/font/book.otf", deflated).unwrap();
+        zip.write_all(&protected).unwrap();
+        zip.finish().unwrap();
+
+        let (served, mime) = resource(&path, "OEBPS/font/book.otf").unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(served, original);
+        assert_eq!(mime, "font/otf");
     }
 }

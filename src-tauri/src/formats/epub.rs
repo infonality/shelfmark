@@ -115,6 +115,9 @@ pub(crate) struct Opf {
     pub isbn: Option<String>,
     pub description: Option<String>,
     pub subjects: Vec<String>,
+    /// Value of the package's unique identifier. Besides identifying the
+    /// publication, EPUB uses this as the key material for obfuscated fonts.
+    pub unique_identifier: Option<String>,
     pub manifest: Vec<ManifestItem>,
     pub spine: Vec<String>,
     /// `<meta name="cover" content="ID"/>` (epub2 cover pointer).
@@ -130,6 +133,9 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
     let mut cur: Option<&'static str> = None;
     // Whether the current dc:identifier looks like an ISBN.
     let mut ident_is_isbn = false;
+    let mut unique_identifier_id: Option<String> = None;
+    let mut current_identifier_id: Option<String> = None;
+    let mut first_identifier: Option<String> = None;
     let mut buf = Vec::new();
 
     loop {
@@ -140,6 +146,7 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
                 // as `<opf:item>` / `<opf:itemref>` instead. Match the local
                 // name so both forms describe the same package.
                 match e.local_name().as_ref() {
+                    b"package" => unique_identifier_id = attr(&e, b"unique-identifier"),
                     b"title" => cur = Some("title"),
                     b"creator" => {
                         if opf.author.is_none() {
@@ -157,6 +164,7 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
                     b"subject" => cur = Some("subject"),
                     b"identifier" => {
                         cur = Some("identifier");
+                        current_identifier_id = attr(&e, b"id");
                         ident_is_isbn = attr(&e, b"opf:scheme")
                             .or_else(|| attr(&e, b"scheme"))
                             .map(|s| s.to_ascii_lowercase().contains("isbn"))
@@ -186,15 +194,31 @@ pub(crate) fn parse_opf(xml: &str) -> Opf {
             Ok(Event::Text(t)) => {
                 if let Some(field) = cur {
                     let text = t.xml10_content().unwrap_or_default().to_string();
+                    if field == "identifier" {
+                        if first_identifier.is_none() {
+                            first_identifier = Some(text.clone());
+                        }
+                        if current_identifier_id.as_deref() == unique_identifier_id.as_deref()
+                            && unique_identifier_id.is_some()
+                        {
+                            opf.unique_identifier = Some(text.clone());
+                        }
+                    }
                     store_dc(&mut opf, field, &text, ident_is_isbn);
                 }
             }
-            Ok(Event::End(_)) => cur = None,
+            Ok(Event::End(_)) => {
+                cur = None;
+                current_identifier_id = None;
+            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
         buf.clear();
+    }
+    if opf.unique_identifier.is_none() {
+        opf.unique_identifier = first_identifier;
     }
     opf
 }
@@ -411,6 +435,22 @@ mod tests {
         assert_eq!(opf.manifest[0].href, "Text/chapter.xhtml");
         assert_eq!(opf.spine, ["chapter"]);
         assert_eq!(cover_href(&opf).as_deref(), Some("Images/cover.jpg"));
+    }
+
+    #[test]
+    fn reads_the_package_unique_identifier_for_font_obfuscation() {
+        let xml = r#"<package unique-identifier="bookid"
+                     xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <metadata>
+            <dc:identifier id="isbn">9780000000000</dc:identifier>
+            <dc:identifier id="bookid">urn:uuid:76571D94-E513-4D43-A279-E369313F5A0E</dc:identifier>
+          </metadata>
+        </package>"#;
+        let opf = parse_opf(xml);
+        assert_eq!(
+            opf.unique_identifier.as_deref(),
+            Some("urn:uuid:76571D94-E513-4D43-A279-E369313F5A0E")
+        );
     }
 
     #[test]

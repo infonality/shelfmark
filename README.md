@@ -89,9 +89,10 @@ A built in reader opens each book in its own window: paginated two page spread,
 table of contents, and your position remembered to the paragraph. Themes for
 paper, sepia and night, with adjustable size, spacing and margins, and a
 **Publisher's font** option that leaves the book's own typeface and embedded
-fonts exactly as designed. Illustrations preserve their aspect ratio, remain
-inside one page, and move intact to the next page when the remaining space is
-too small.
+fonts, including standard EPUB-obfuscated fonts, exactly as designed.
+Illustrations preserve their aspect ratio and publisher size, remain inside one
+page, and move intact to the next page when the remaining space is too small.
+Long tables continue cleanly between rows instead of overflowing the page.
 
 **Search, highlight and bookmark**
 Full text search across the whole book jumps you to the passage and flags it.

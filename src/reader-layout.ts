@@ -185,14 +185,14 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
        decoration up to its natural pixel size, which is far too big for a
        figure meant to sit in a paragraph. */
     img, svg, video, canvas, [data-bv-page-media] {
-      max-width:${column}px !important;
+      max-width:min(100%, ${column}px) !important;
       max-height:${contentH}px !important;
       box-sizing:border-box;
     }
     /* Respect publisher dimensions such as a two-em imprint logo. When both
        dimensions define a box, contain the bitmap inside it rather than
        stretching its pixels to match the box's proportions. */
-    img { object-fit:contain; }
+    img, video { object-fit:contain !important; }
     /* A publisher can opt a figure into column-span:all, float it across a
        gutter, or put a viewport-wide box around it. Media and media-only
        ancestors are marked before the chapter is serialized so every visual
@@ -203,8 +203,7 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
       break-inside:avoid-column !important;
       page-break-inside:avoid !important;
       -webkit-column-break-inside:avoid !important;
-      float:none !important;
-      max-width:${column}px !important;
+      max-width:min(100%, ${column}px) !important;
       box-sizing:border-box !important;
     }
     [data-bv-page-media] {
@@ -214,16 +213,33 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
     }
     [data-bv-page-media-wrapper] {
       position:static !important;
-      width:auto !important;
     }
-    [data-bv-empty-media-wrapper] { line-height:0 !important; }
+    [data-bv-empty-media-wrapper] {
+      height:auto !important;
+      min-height:0 !important;
+      max-height:${contentH}px !important;
+      line-height:0 !important;
+    }
     /* Leave room for a normal multi-line caption so the image plus caption can
        still fit the page as an unbroken figure. */
     figure[data-bv-page-media-wrapper] [data-bv-page-media] {
       max-height:calc(${contentH}px - 4rem) !important;
     }
-    img, svg, figure, picture, table { break-inside:avoid; page-break-inside:avoid; }
-    table { max-width:100% !important; table-layout:fixed; }
+    img, svg, figure, picture { break-inside:avoid; page-break-inside:avoid; }
+    /* A short table stays together naturally, while a long one is allowed to
+       continue between rows. Marking the entire table unbreakable makes a
+       multi-page appendix overflow the reader instead of paginating. */
+    table {
+      max-width:min(100%, ${column}px) !important;
+      break-inside:auto !important;
+      page-break-inside:auto !important;
+    }
+    thead, tr {
+      break-inside:avoid !important;
+      page-break-inside:avoid !important;
+      -webkit-column-break-inside:avoid !important;
+    }
+    th, td { min-width:0; overflow-wrap:anywhere; }
     pre { white-space:pre-wrap; word-wrap:break-word; }
     h1, h2, h3, h4 { break-after:avoid; text-align:left; hyphens:none; }
     ::selection { background:rgba(120,110,255,.28); }
@@ -477,6 +493,7 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const markup = closeSelfClosingAnchors(unprefixForeignMarkup(chapter.html));
   const doc = new DOMParser().parseFromString(markup, "text/html");
 
+  normalizeDocumentLanguages(doc);
   preserveImageAspectRatios(doc);
   markMediaForPagination(doc);
 
@@ -498,11 +515,11 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   defaults.textContent = `
     body { font-family:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif;
            -webkit-font-smoothing:antialiased; }
-    a { color:inherit; text-decoration:none; }
     p { margin:0 0 0.2em; text-indent:1.3em; }
     p:first-of-type, h1 + p, h2 + p, h3 + p, blockquote p { text-indent:0; }
     h1,h2,h3 { font-weight:600; letter-spacing:-0.01em; }
     blockquote { margin:1em 1.5em; font-style:italic; }
+    [epub\\:type~="pagebreak"], [role~="doc-pagebreak"] { display:none; }
   `;
   doc.head.insertBefore(defaults, baseEl.nextSibling);
 
@@ -512,6 +529,18 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   doc.head.appendChild(veil);
 
   return `<!doctype html>${doc.documentElement.outerHTML}`;
+}
+
+/**
+ * XHTML understands `xml:lang`; the forgiving HTML parser used for real-world
+ * EPUB markup does not use it for shaping or automatic hyphenation. Mirror it
+ * to HTML's `lang` wherever the publisher did not already provide one.
+ */
+export function normalizeDocumentLanguages(doc: Document) {
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("*"))) {
+    const language = element.getAttribute("xml:lang")?.trim();
+    if (language && !element.hasAttribute("lang")) element.setAttribute("lang", language);
+  }
 }
 
 /**
