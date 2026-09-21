@@ -193,6 +193,7 @@ export function applyLayoutStyle(doc: Document, g: Geometry, prefs: ReaderPrefs)
        dimensions define a box, contain the bitmap inside it rather than
        stretching its pixels to match the box's proportions. */
     img, video { object-fit:contain !important; }
+    img { cursor:zoom-in; }
     /* A publisher can opt a figure into column-span:all, float it across a
        gutter, or put a viewport-wide box around it. Media and media-only
        ancestors are marked before the chapter is serialized so every visual

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.2 — 2026-09-21
+
+### EPUB image viewer
+
+- Double-click any raster image in an EPUB to open it in a dedicated window.
+- Start with the entire image fitted inside the window without changing its
+  aspect ratio.
+- Add Fit, actual-size (100%), zoom-out, and zoom-in controls, with keyboard
+  shortcuts for each view.
+- Keep original-size images scrollable at high zoom and support embedded data
+  images without putting their contents in a window URL.
+
 ## 0.6.1 — 2026-09-21
 
 ### EPUB reader hotfix

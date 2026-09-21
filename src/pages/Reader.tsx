@@ -46,6 +46,7 @@ import {
   Theme,
   THEMES,
 } from "../reader-prefs";
+import { openImageViewer } from "../open-image";
 
 /**
  * Paginated EPUB reader, modelled on the presentation Books uses on macOS:
@@ -321,6 +322,21 @@ export default function Reader({
             target.fragment ? { kind: "fragment", id: target.fragment } : { kind: "page", page: 0 }
           );
         }
+      });
+
+      // An EPUB image can be deliberately small in the page layout while its
+      // source contains far more detail. Open that exact resolved resource in
+      // a separate window at fit-to-window size, with actual-pixel zoom
+      // available there. The source stays on Shelfmark's guarded book protocol.
+      doc.addEventListener("dblclick", (e) => {
+        const image = (e.target as HTMLElement)?.closest?.("img") as HTMLImageElement | null;
+        if (!image) return;
+        const src = image.currentSrc || image.src;
+        if (!src) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const label = image.alt || image.title || "EPUB image";
+        openImageViewer(src, `${label} — ${book.title}`, image.alt);
       });
 
       // Our own menu, not WebView2's reload/inspect one.
@@ -1289,4 +1305,3 @@ function ContextMenu({
     </div>
   );
 }
-
