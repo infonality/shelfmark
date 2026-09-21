@@ -432,17 +432,44 @@ export function unprefixForeignMarkup(html: string): string {
   return out;
 }
 
+/** HTML elements for which an XHTML self-closing slash is unsafe in HTML. */
+const NON_VOID_HTML_ELEMENTS = new Set([
+  "a", "abbr", "address", "article", "aside", "audio", "b", "bdi", "bdo",
+  "blockquote", "button", "caption", "cite", "code", "colgroup", "data",
+  "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+  "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
+  "h3", "h4", "h5", "h6", "header", "hgroup", "i", "ins", "kbd", "label",
+  "legend", "li", "main", "map", "mark", "menu", "meter", "nav", "noscript",
+  "object", "ol", "optgroup", "option", "output", "p", "picture", "pre",
+  "progress", "q", "rp", "rt", "ruby", "s", "samp", "section", "select",
+  "slot", "small", "span", "strong", "sub", "summary", "sup", "table",
+  "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time",
+  "tr", "u", "ul", "var", "video",
+]);
+
 /**
- * Make XHTML's self-closing anchors unambiguous to the forgiving HTML parser.
+ * Turn XHTML's self-closing HTML elements into explicit opening and closing
+ * tags before using the forgiving HTML parser.
  *
- * In XHTML `<a id="page-12"/>` is an empty page marker. Parsed as HTML it is
- * an opening tag, so the prose after it can accidentally become one enormous
- * link. Closing only these anchor tags preserves the forgiving parser while
- * preventing the random linked/blue passages that malformed that content.
+ * HTML only honours the self-closing slash on void elements and on elements
+ * inside SVG or MathML. EPUBs routinely use valid XHTML such as
+ * `<span role="doc-pagebreak"/>`, `<a id="figure"/>`, and even `<td/>`. Parsed
+ * directly as HTML, one of those becomes an opening tag that swallows the rest
+ * of the chapter. This used to produce random giant links; once page markers
+ * were hidden it could hide the complete chapter.
+ *
+ * The allowlist deliberately contains HTML elements only. Foreign-content
+ * elements such as SVG `<path/>` and `<image/>` keep their XML form so the HTML
+ * parser can apply its native SVG and MathML rules.
  */
-export function closeSelfClosingAnchors(html: string): string {
-  return html.replace(/<a\b(?:[^>"']|"[^"]*"|'[^']*')*\/\s*>/gi, (tag) =>
-    tag.replace(/\/\s*>$/, "></a>")
+export function closeSelfClosingHtmlElements(html: string): string {
+  return html.replace(
+    /<([A-Za-z][\w.-]*)(\b(?:[^>"']|"[^"]*"|'[^']*')*)\/\s*>/g,
+    (tag, rawName: string) => {
+      const name = rawName.toLowerCase();
+      if (!NON_VOID_HTML_ELEMENTS.has(name)) return tag;
+      return `${tag.replace(/\/\s*>$/, ">")}</${rawName}>`;
+    }
   );
 }
 
@@ -490,7 +517,7 @@ const CHAPTER_CSP = [
  */
 export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const base = `${resourceBase}${chapter.dir ? `${chapter.dir}/` : ""}`;
-  const markup = closeSelfClosingAnchors(unprefixForeignMarkup(chapter.html));
+  const markup = closeSelfClosingHtmlElements(unprefixForeignMarkup(chapter.html));
   const doc = new DOMParser().parseFromString(markup, "text/html");
 
   normalizeDocumentLanguages(doc);
@@ -519,7 +546,7 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
     p:first-of-type, h1 + p, h2 + p, h3 + p, blockquote p { text-indent:0; }
     h1,h2,h3 { font-weight:600; letter-spacing:-0.01em; }
     blockquote { margin:1em 1.5em; font-style:italic; }
-    [epub\\:type~="pagebreak"], [role~="doc-pagebreak"] { display:none; }
+    [epub\\:type~="pagebreak"]:empty, [role~="doc-pagebreak"]:empty { display:none; }
   `;
   doc.head.insertBefore(defaults, baseEl.nextSibling);
 

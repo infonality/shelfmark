@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1 — 2026-09-21
+
+### EPUB reader hotfix
+
+- Repair valid XHTML self-closing HTML elements before chapters enter the
+  browser's HTML parser. Elements such as `<span role="doc-pagebreak"/>` now
+  remain empty instead of swallowing the rest of the chapter.
+- Hide only page-break markers that are actually empty, so malformed markup
+  cannot make an entire chapter disappear.
+- Restore rendering and pagination for *AI Snake Oil* while retaining the image,
+  table, font, and link improvements from 0.6.0.
+
 ## 0.6.0 — 2026-09-20
 
 Shelfmark 0.6 brings the recent library-management, large-library, and EPUB
@@ -52,4 +64,3 @@ reader work together in one release.
 
 - Build Windows MSI and EXE installers, a universal macOS DMG and app archive,
   and Linux AppImage, DEB, and RPM packages.
-
