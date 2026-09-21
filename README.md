@@ -92,7 +92,7 @@ paper, sepia and night, with adjustable size, spacing and margins, and a
 fonts, including standard EPUB-obfuscated fonts, exactly as designed.
 Illustrations preserve their aspect ratio and publisher size, remain inside one
 page, and move intact to the next page when the remaining space is too small.
-Long tables continue cleanly between rows instead of overflowing the page.
+Long tables continue across pages without overflowing the reader.
 
 **Search, highlight and bookmark**
 Full text search across the whole book jumps you to the passage and flags it.
@@ -227,6 +227,7 @@ three platforms and attaches them to the run as artifacts instead.
 ```
 src/                    React + TypeScript UI
   api.ts                typed wrappers over the Tauri command surface
+  epub-compat/          ordered XHTML and document compatibility passes
   ui.tsx                shared primitives (icons, buttons, star rating)
   reader-prefs.ts       themes, typefaces and spacing for the reader
   series.ts             groups comics into series from tags or filenames
@@ -254,8 +255,15 @@ would strand every existing library. It's invisible to users; leave it be.
 ## Tests
 
 ```bash
+npm run test:epub
+npm run build
 cd src-tauri && cargo test
 ```
+
+The EPUB suite generates a synthetic test publication, checks each
+compatibility pass in a DOM, and renders the fixtures in Chromium and WebKit.
+Set `SHELFMARK_EPUB_CORPUS_ROOT` to a local book folder to include the four
+historical regression books; their contents are never copied into the repo.
 
 ## License
 

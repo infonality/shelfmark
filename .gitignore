@@ -16,3 +16,6 @@ src-tauri/libpdfium.so
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
+tests/epub/generated/*.epub
+playwright-report
+test-results

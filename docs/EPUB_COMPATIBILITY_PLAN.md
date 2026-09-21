@@ -1,6 +1,6 @@
 # EPUB compatibility layer
 
-Status: implementation plan. This document does not change reader behavior.
+Status: Phase 1 complete on 2026-09-21. Phases 2-4 remain planned.
 
 ## Goal
 
@@ -265,6 +265,17 @@ an additional pre-release compatibility sweep.
 
 ### Phase 1 — Boundary and regression gate
 
+Implemented. The compatibility code now lives under `src/epub-compat/`, the
+fixture generator and unit/render tests live under `tests/epub/`, and both the
+normal verification workflow and release workflow run `npm run test:epub`.
+The optional local corpus verifies the four original regression books by hash
+without checking their copyrighted contents into the repository.
+
+WebKit can still fragment a table row in a multi-column flow despite the
+standards-based `break-inside` hint. The cross-engine test therefore enforces
+the reliable invariant: every fragment remains within one page, cell content
+wraps, and no row or content is lost.
+
 - Add the TypeScript test runner and DOM environment.
 - Extract current repairs into the XHTML bridge and named passes without
   changing generated markup.
@@ -305,10 +316,10 @@ silently become an empty sequence of pages.
 Exit criteria: the supported feature matrix is documented, tested, and linked
 to either a specification requirement or an explicit Shelfmark limitation.
 
-## First implementation slice
+## Delivered implementation slice
 
-Phase 1 should be the next reader change. It provides the largest risk
-reduction without changing book presentation:
+Phase 1 was delivered as the first reader change after this plan. It provides
+the largest risk reduction without changing book presentation:
 
 1. Install a lightweight TypeScript test runner with a DOM environment.
 2. Move `unprefixForeignMarkup`, `closeSelfClosingHtmlElements`,
@@ -320,6 +331,5 @@ reduction without changing book presentation:
 4. Test one- and two-column layout at the supported font-size extremes.
 5. Add the EPUB test command to a pre-package CI job required by every release.
 
-No additional rendering repair should merge before this slice is in place;
-otherwise the compatibility layer will begin with the same untested coupling it
-is intended to remove.
+Future rendering repairs must add or extend a focused fixture before they
+merge, so compatibility behavior does not return to untested coupling.

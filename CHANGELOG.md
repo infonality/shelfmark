@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### EPUB compatibility gate
+
+- Move XHTML repairs and document normalization into an ordered, named EPUB
+  compatibility pipeline that reports which repairs a chapter needed.
+- Add a generated EPUB fixture for self-closing markup, prefixed SVG covers,
+  publisher-sized images, linked contents, and long tables.
+- Render the fixtures in Chromium and WebKit across narrow, default, and wide
+  layouts, and guard the four books that exposed earlier regressions with an
+  optional local corpus test.
+- Require the EPUB suite and frontend build to pass before release packaging.
+
 ## 0.6.2 — 2026-09-21
 
 ### EPUB image viewer

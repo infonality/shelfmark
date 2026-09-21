@@ -1,0 +1,22 @@
+[
+  {
+    "match": "AI Snake Oil",
+    "sha256": "6858062c170b4546e54f97628446949afe20e87769202aa607f5997e3dd583e0",
+    "guards": "self-closing pagebreak markers cannot swallow or hide the chapter"
+  },
+  {
+    "match": "Co-Intelligence",
+    "sha256": "a734b4e1f5aa36e174660f7aa688b69b3a3ade82fa53f5d8b1363d92f4994ed5",
+    "guards": "publisher-sized imprint and figure images remain intact"
+  },
+  {
+    "match": "Silmarillion Illustrated",
+    "sha256": "c703c5fd7b9d302c76c1ac0439b5af2eaf8df26304d6fde8e4538f0e4d91ad67",
+    "guards": "prefixed SVG cover and image aspect ratios remain renderable"
+  },
+  {
+    "match": "The Model Thinker",
+    "sha256": "61be922431598bd6d1d4d3a6eba4afd8d6eed7cf23fea804842061d2e475190c",
+    "guards": "link styling and document structure are not over-normalized"
+  }
+]

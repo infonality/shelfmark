@@ -23,6 +23,7 @@
  */
 
 import { Chapter, ReaderSession } from "./api";
+import { prepareChapterDocument } from "./epub-compat/pipeline";
 import { FONT_STACKS, ReaderPrefs, THEMES } from "./reader-prefs";
 
 /** Width past which a second column reads better than one long line. */
@@ -396,84 +397,6 @@ function decode(s: string): string {
   }
 }
 
-/** Namespaces whose elements the HTML parser knows how to adopt on sight. */
-const FOREIGN_NS = [
-  "http://www.w3.org/2000/svg",
-  "http://www.w3.org/1998/Math/MathML",
-];
-
-/**
- * Drop the namespace prefix from SVG and MathML element names.
- *
- * A chapter is XHTML, but it is parsed here as HTML, which is far more
- * forgiving of the malformed markup real EPUBs are full of. The one thing HTML
- * parsing cannot do is honour a namespace prefix: written `<svg:svg>`, the
- * parser produces an unknown element in the XHTML namespace — no box, no
- * rendered children — so a cover page authored that way comes out completely
- * blank. Written `<svg>`, the same parser adopts it into the SVG namespace and
- * it renders. The prefix is the only difference.
- *
- * Only prefixes the document itself binds to SVG or MathML are touched, and
- * only where they open or close a tag, so this can't disturb prose that happens
- * to contain a colon after a less-than sign.
- */
-export function unprefixForeignMarkup(html: string): string {
-  const declarations = /xmlns:([A-Za-z_][\w.-]*)\s*=\s*["']([^"']+)["']/g;
-  const prefixes = new Set<string>();
-  for (const m of html.matchAll(declarations)) {
-    if (FOREIGN_NS.includes(m[2].trim())) prefixes.add(m[1]);
-  }
-  if (prefixes.size === 0) return html;
-
-  let out = html;
-  for (const prefix of prefixes) {
-    const escaped = prefix.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-    out = out.replace(new RegExp(`(</?)${escaped}:(?=[A-Za-z])`, "g"), "$1");
-  }
-  return out;
-}
-
-/** HTML elements for which an XHTML self-closing slash is unsafe in HTML. */
-const NON_VOID_HTML_ELEMENTS = new Set([
-  "a", "abbr", "address", "article", "aside", "audio", "b", "bdi", "bdo",
-  "blockquote", "button", "caption", "cite", "code", "colgroup", "data",
-  "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
-  "em", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2",
-  "h3", "h4", "h5", "h6", "header", "hgroup", "i", "ins", "kbd", "label",
-  "legend", "li", "main", "map", "mark", "menu", "meter", "nav", "noscript",
-  "object", "ol", "optgroup", "option", "output", "p", "picture", "pre",
-  "progress", "q", "rp", "rt", "ruby", "s", "samp", "section", "select",
-  "slot", "small", "span", "strong", "sub", "summary", "sup", "table",
-  "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "time",
-  "tr", "u", "ul", "var", "video",
-]);
-
-/**
- * Turn XHTML's self-closing HTML elements into explicit opening and closing
- * tags before using the forgiving HTML parser.
- *
- * HTML only honours the self-closing slash on void elements and on elements
- * inside SVG or MathML. EPUBs routinely use valid XHTML such as
- * `<span role="doc-pagebreak"/>`, `<a id="figure"/>`, and even `<td/>`. Parsed
- * directly as HTML, one of those becomes an opening tag that swallows the rest
- * of the chapter. This used to produce random giant links; once page markers
- * were hidden it could hide the complete chapter.
- *
- * The allowlist deliberately contains HTML elements only. Foreign-content
- * elements such as SVG `<path/>` and `<image/>` keep their XML form so the HTML
- * parser can apply its native SVG and MathML rules.
- */
-export function closeSelfClosingHtmlElements(html: string): string {
-  return html.replace(
-    /<([A-Za-z][\w.-]*)(\b(?:[^>"']|"[^"]*"|'[^']*')*)\/\s*>/g,
-    (tag, rawName: string) => {
-      const name = rawName.toLowerCase();
-      if (!NON_VOID_HTML_ELEMENTS.has(name)) return tag;
-      return `${tag.replace(/\/\s*>$/, ">")}</${rawName}>`;
-    }
-  );
-}
-
 /**
  * Where the book's own files come from. Tauri maps a custom scheme onto an http
  * origin on Windows and serves it as a real scheme elsewhere, so both spellings
@@ -518,12 +441,7 @@ const CHAPTER_CSP = [
  */
 export function buildDocument(chapter: Chapter, resourceBase: string): string {
   const base = `${resourceBase}${chapter.dir ? `${chapter.dir}/` : ""}`;
-  const markup = closeSelfClosingHtmlElements(unprefixForeignMarkup(chapter.html));
-  const doc = new DOMParser().parseFromString(markup, "text/html");
-
-  normalizeDocumentLanguages(doc);
-  preserveImageAspectRatios(doc);
-  markMediaForPagination(doc);
+  const { document: doc } = prepareChapterDocument(chapter.html);
 
   // First in the head, before anything that could fetch or run. A book may
   // carry a policy of its own; a second one can only narrow this, never widen
@@ -547,7 +465,7 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
     p:first-of-type, h1 + p, h2 + p, h3 + p, blockquote p { text-indent:0; }
     h1,h2,h3 { font-weight:600; letter-spacing:-0.01em; }
     blockquote { margin:1em 1.5em; font-style:italic; }
-    [epub\\:type~="pagebreak"]:empty, [role~="doc-pagebreak"]:empty { display:none; }
+    [data-bv-empty-pagebreak] { display:none; }
   `;
   doc.head.insertBefore(defaults, baseEl.nextSibling);
 
@@ -557,58 +475,4 @@ export function buildDocument(chapter: Chapter, resourceBase: string): string {
   doc.head.appendChild(veil);
 
   return `<!doctype html>${doc.documentElement.outerHTML}`;
-}
-
-/**
- * XHTML understands `xml:lang`; the forgiving HTML parser used for real-world
- * EPUB markup does not use it for shaping or automatic hyphenation. Mirror it
- * to HTML's `lang` wherever the publisher did not already provide one.
- */
-export function normalizeDocumentLanguages(doc: Document) {
-  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("*"))) {
-    const language = element.getAttribute("xml:lang")?.trim();
-    if (language && !element.hasAttribute("lang")) element.setAttribute("lang", language);
-  }
-}
-
-/**
- * Refuse the SVG opt-out that stretches artwork to the viewport.
- *
- * EPUB cover pages commonly wrap a bitmap in an SVG sized to 100% by 100%.
- * `preserveAspectRatio="none"` then deforms that bitmap whenever the reader
- * and cover have different proportions. `meet` keeps the whole image visible
- * and centres any spare space. The same rule applies to nested SVG `<image>`
- * elements, where `none` would distort the bitmap inside an otherwise
- * correctly proportioned SVG.
- */
-export function preserveImageAspectRatios(doc: Document) {
-  doc.querySelectorAll("svg, image").forEach((el) => {
-    if (el.getAttribute("preserveAspectRatio")?.trim().toLowerCase() === "none") {
-      el.setAttribute("preserveAspectRatio", "xMidYMid meet");
-    }
-  });
-}
-
-/**
- * Mark visual elements and their image-only wrappers for the pagination
- * stylesheet. Applying the rule to the wrapper matters: EPUBs commonly put a
- * cover or illustration inside a viewport-wide `<div>` or an anchor with
- * `column-span:all`; constraining only the nested `<img>` leaves that outer box
- * spanning both pages of a spread.
- */
-export function markMediaForPagination(doc: Document) {
-  const media = Array.from(doc.querySelectorAll<HTMLElement>("img, svg, video, canvas"));
-  for (const element of media) {
-    element.setAttribute("data-bv-page-media", "");
-    let parent = element.parentElement;
-    for (let depth = 0; parent && parent !== doc.body && depth < 4; depth += 1) {
-      const tag = parent.tagName.toLowerCase();
-      const isFigure = tag === "figure" || tag === "picture";
-      const isEmptyWrapper = parent.textContent?.trim() === "";
-      if (!isFigure && !isEmptyWrapper) break;
-      parent.setAttribute("data-bv-page-media-wrapper", "");
-      if (isEmptyWrapper) parent.setAttribute("data-bv-empty-media-wrapper", "");
-      parent = parent.parentElement;
-    }
-  }
 }

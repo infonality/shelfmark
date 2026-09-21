@@ -11,7 +11,31 @@ on:
   workflow_dispatch: # allow manual runs from the Actions tab
 
 jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install EPUB render-test browsers
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Test EPUB compatibility layer
+        run: npm run test:epub
+
+      - name: Build frontend
+        run: npm run build
+
   release:
+    needs: verify
     permissions:
       contents: write # needed to create the GitHub Release
     strategy:

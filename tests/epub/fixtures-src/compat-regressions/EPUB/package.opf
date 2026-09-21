@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="book-id">urn:uuid:shelfmark-compat-regressions</dc:identifier>
+    <dc:title>Shelfmark EPUB Compatibility Regressions</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="self-closing" href="self-closing.xhtml" media-type="application/xhtml+xml"/>
+    <item id="svg-cover" href="prefixed-svg.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+    <item id="publisher-images" href="publisher-images.xhtml" media-type="application/xhtml+xml"/>
+    <item id="linked-toc" href="linked-toc.xhtml" media-type="application/xhtml+xml"/>
+    <item id="long-table" href="long-table.xhtml" media-type="application/xhtml+xml"/>
+    <item id="art" href="art.svg" media-type="image/svg+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="self-closing"/>
+    <itemref idref="svg-cover"/>
+    <itemref idref="publisher-images"/>
+    <itemref idref="linked-toc"/>
+    <itemref idref="long-table"/>
+  </spine>
+</package>
