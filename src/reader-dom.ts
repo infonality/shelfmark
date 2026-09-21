@@ -171,6 +171,53 @@ export function elementForFragment(doc: Document, id: string): Element | null {
   }
 }
 
+/**
+ * Whether an internal link is being used as a note reference.
+ *
+ * EPUB 3 gives us `epub:type="noteref"` and DPUB-ARIA gives us
+ * `role="doc-noteref"`, but many EPUB 2 books only use a superscript number
+ * or a conventional `fn`/`note` identifier. The conservative fallbacks below
+ * cover those books without turning ordinary chapter links into note jumps.
+ */
+export function isNoteReference(anchor: HTMLAnchorElement, doc: Document): boolean {
+  if (hasToken(anchor, "epub:type", "noteref") || hasToken(anchor, "role", "doc-noteref")) {
+    return true;
+  }
+
+  const href = anchor.getAttribute("href")?.trim() ?? "";
+  if (!href.startsWith("#") || href.length < 2) return false;
+
+  let id = href.slice(1);
+  try {
+    id = decodeURIComponent(id);
+  } catch {
+    /* A malformed fragment can still be inspected as written. */
+  }
+
+  for (let element = elementForFragment(doc, id); element; element = element.parentElement) {
+    if (
+      ["footnote", "endnote", "rearnote"].some((token) => hasToken(element, "epub:type", token)) ||
+      ["doc-footnote", "doc-endnote"].some((token) => hasToken(element, "role", token))
+    ) {
+      return true;
+    }
+    if (element === doc.body) break;
+  }
+
+  const label = anchor.textContent?.trim() ?? "";
+  if (anchor.closest("sup") && /^(?:\d{1,3}|[a-z]|[*†‡]+)$/i.test(label)) return true;
+
+  const hint = `${id} ${anchor.id} ${anchor.className}`.toLowerCase();
+  return /(?:^|[-_])(fn|footnote|endnote|note)(?:[-_\d]|$)/.test(hint) && label.length <= 6;
+}
+
+function hasToken(element: Element, attribute: string, wanted: string): boolean {
+  return (element.getAttribute(attribute) ?? "")
+    .trim()
+    .split(/\s+/)
+    .includes(wanted);
+}
+
 export const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: "rgba(255, 214, 0, .38)",
   green: "rgba(52, 211, 153, .34)",

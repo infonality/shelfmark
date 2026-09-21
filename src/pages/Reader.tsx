@@ -13,6 +13,7 @@ import {
   clearMarks,
   elementForFragment,
   HIGHLIGHT_COLORS,
+  isNoteReference,
   markRange,
   offsetsForOccurrence,
   offsetsForSelection,
@@ -105,6 +106,12 @@ type Menu = {
 
 type Panel = "toc" | "search" | "notes" | null;
 
+type NoteReturn = {
+  spine: number;
+  page: number;
+  ratio: number;
+};
+
 export default function Reader({
   book,
   onClose,
@@ -136,6 +143,7 @@ export default function Reader({
   const [cols, setCols] = useState<1 | 2>(1);
   const [fullscreen, setFullscreen] = useState(false);
   const [chrome, setChrome] = useState(true);
+  const [noteReturn, setNoteReturn] = useState<NoteReturn | null>(null);
 
   const frameRef = useRef<HTMLIFrameElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -317,6 +325,15 @@ export default function Reader({
         // would mean fetching from the network inside a frame showing
         // untrusted markup.
         if (target) {
+          if (isNoteReference(a as HTMLAnchorElement, doc)) {
+            setNoteReturn({
+              spine: chapter.index,
+              page: pageRef.current,
+              ratio: pagesRef.current > 1 ? pageRef.current / pagesRef.current : 0,
+            });
+          } else {
+            setNoteReturn(null);
+          }
           goToRef.current(
             target.spine,
             target.fragment ? { kind: "fragment", id: target.fragment } : { kind: "page", page: 0 }
@@ -444,6 +461,7 @@ export default function Reader({
       const spine = chapterRef.current;
       if (!frame || !doc || spine === null) return;
       setMenu(null);
+      setNoteReturn(null);
       flash.current = null;
       // A turn is the reader overriding whatever we were about to land on.
       landingRef.current = null;
@@ -631,11 +649,23 @@ export default function Reader({
   /** Jump to a result, then locate the exact phrase once the page renders. */
   const gotoHit = useCallback(
     (hit: SearchHit) => {
+      setNoteReturn(null);
       flash.current = { text: query.trim(), occurrence: hit.occurrence };
       goToChapter(hit.spine, { kind: "flash" });
     },
     [query, goToChapter]
   );
+
+  const returnFromNote = useCallback(() => {
+    if (!noteReturn) return;
+    const origin = noteReturn;
+    setNoteReturn(null);
+    flash.current = null;
+    // The ratio resolves to the exact same page while the layout is unchanged,
+    // and still returns to the same passage if the window was resized while
+    // the reader was looking at the note.
+    goToChapter(origin.spine, { kind: "ratio", ratio: origin.ratio });
+  }, [noteReturn, goToChapter]);
 
   const addAnnotation = useCallback(
     async (kind: "highlight" | "bookmark", color = "yellow") => {
@@ -811,16 +841,17 @@ export default function Reader({
                 <button
                   key={i}
                   disabled={t.spine_index === null}
-                  onClick={() =>
-                    t.spine_index !== null &&
+                  onClick={() => {
+                    if (t.spine_index === null) return;
+                    setNoteReturn(null);
                     goToChapter(
                       t.spine_index,
                       // Anthologies and single-file books hang their whole
                       // contents off fragments of one document, so an entry
                       // that names one has to be followed to it.
                       t.fragment ? { kind: "fragment", id: t.fragment } : { kind: "page", page: 0 }
-                    )
-                  }
+                    );
+                  }}
                   style={{ paddingLeft: 14 + t.depth * 14 }}
                   className={cx(
                     "block w-full truncate py-1.5 pr-3 text-left text-[13px] transition-colors",
@@ -910,6 +941,7 @@ export default function Reader({
                     />
                     <button
                       onClick={() => {
+                        setNoteReturn(null);
                         flash.current = null;
                         goToChapter(a.spine, {
                           kind: "offsets",
@@ -978,6 +1010,16 @@ export default function Reader({
                 {/* Spine between the two pages of a spread. */}
                 {cols === 2 && (
                   <div className="pointer-events-none absolute inset-y-8 left-1/2 w-px -translate-x-1/2 bg-black/[0.07]" />
+                )}
+                {noteReturn && (
+                  <button
+                    onClick={returnFromNote}
+                    title="Return to where you opened this note"
+                    className="absolute bottom-4 left-4 z-20 flex items-center gap-1.5 rounded-full border border-white/15 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-white shadow-lg backdrop-blur transition-colors hover:bg-slate-800"
+                  >
+                    <span aria-hidden="true">←</span>
+                    Back to page {noteReturn.page + 1}
+                  </button>
                 )}
               </>
             )}

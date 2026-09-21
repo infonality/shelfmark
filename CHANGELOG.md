@@ -4,6 +4,8 @@
 
 ### EPUB compatibility gate
 
+- Show a floating return button after following a footnote or endnote link so
+  the reader can return to the page where the note was opened.
 - Move XHTML repairs and document normalization into an ordered, named EPUB
   compatibility pipeline that reports which repairs a chapter needed.
 - Add a generated EPUB fixture for self-closing markup, prefixed SVG covers,
