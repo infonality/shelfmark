@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-09-21
+
+Shelfmark 0.7 adds a tested EPUB compatibility boundary around the reader and
+makes footnote navigation reversible without disturbing the book's layout.
 
 ### EPUB compatibility gate
 
