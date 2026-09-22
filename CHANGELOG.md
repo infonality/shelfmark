@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.1 — 2026-09-22
+
+Shelfmark 0.7.1 makes footnote detours more forgiving and updates the app's sidebar description to match its role as a complete digital library.
+
+### Library identity
+
+- Replace the old **Reading tracker** sidebar description with **Digital Library**.
+
+### EPUB footnotes
+
+- Keep the **Back to page** control available through five page turns after
+  following a footnote or endnote, so nearby note pages can be explored safely.
+
 ## 0.7.0 — 2026-09-21
 
 Shelfmark 0.7 adds a tested EPUB compatibility boundary around the reader and

@@ -36,6 +36,7 @@ import {
   showPage,
 } from "../reader-layout";
 import { Clock, cx, Icon, Spinner } from "../ui";
+import { NoteReturn, noteReturnAfterPageTurn } from "../note-return";
 import { IS_MAC, TRAFFIC_LIGHT_INSET } from "../platform";
 import {
   DEFAULT_PREFS,
@@ -105,12 +106,6 @@ type Menu = {
 } | null;
 
 type Panel = "toc" | "search" | "notes" | null;
-
-type NoteReturn = {
-  spine: number;
-  page: number;
-  ratio: number;
-};
 
 export default function Reader({
   book,
@@ -330,6 +325,7 @@ export default function Reader({
               spine: chapter.index,
               page: pageRef.current,
               ratio: pagesRef.current > 1 ? pageRef.current / pagesRef.current : 0,
+              navigationPages: 0,
             });
           } else {
             setNoteReturn(null);
@@ -461,15 +457,24 @@ export default function Reader({
       const spine = chapterRef.current;
       if (!frame || !doc || spine === null) return;
       setMenu(null);
-      setNoteReturn(null);
       flash.current = null;
       // A turn is the reader overriding whatever we were about to land on.
       landingRef.current = null;
 
       const next = pageRef.current + dir;
-      if (next < 0) return void goToChapter(spine - 1, { kind: "end" });
-      if (next >= pagesRef.current) return void goToChapter(spine + 1, { kind: "page", page: 0 });
+      if (next < 0) {
+        if (spine === 0) return;
+        setNoteReturn(noteReturnAfterPageTurn);
+        return void goToChapter(spine - 1, { kind: "end" });
+      }
+      if (next >= pagesRef.current) {
+        const lastSpine = (sessionRef.current?.spine.length ?? 0) - 1;
+        if (spine >= lastSpine) return;
+        setNoteReturn(noteReturnAfterPageTurn);
+        return void goToChapter(spine + 1, { kind: "page", page: 0 });
+      }
 
+      setNoteReturn(noteReturnAfterPageTurn);
       pageRef.current = next;
       setPage(next);
       showPage(doc, next, geomRef.current?.w ?? frame.getBoundingClientRect().width);

@@ -184,7 +184,7 @@ export default function App() {
                 {__APP_VERSION__}
               </span>
             </div>
-            <div className="text-[11px] text-slate-500">Reading tracker</div>
+            <div className="text-[11px] text-slate-500">Digital Library</div>
           </div>
         </div>
 
