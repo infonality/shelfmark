@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { openReaderWindow, readsInApp } from "../open-book";
 import {
@@ -21,6 +21,46 @@ type SortKey = "title" | "author" | "category" | "status" | "progress" | "rating
 type StatusFilter = "all" | Status;
 type ViewMode = "list" | "grid";
 const PAGE_SIZE = 120;
+const LIST_COLUMNS: SortKey[] = ["title", "author", "category", "status", "progress", "rating", "pages"];
+const DEFAULT_COLUMN_WIDTHS: Record<SortKey, number> = {
+  title: 300,
+  author: 160,
+  category: 130,
+  status: 100,
+  progress: 125,
+  rating: 110,
+  pages: 75,
+};
+const MIN_COLUMN_WIDTHS: Record<SortKey, number> = {
+  title: 140,
+  author: 90,
+  category: 90,
+  status: 85,
+  progress: 105,
+  rating: 95,
+  pages: 65,
+};
+
+function columnWidthKey(kind: Kind) {
+  return `bv.libraryColumns.${kind}`;
+}
+
+function loadColumnWidths(kind: Kind): Record<SortKey, number> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(columnWidthKey(kind)) ?? "null");
+    if (!saved || typeof saved !== "object") return { ...DEFAULT_COLUMN_WIDTHS };
+    return Object.fromEntries(
+      LIST_COLUMNS.map((key) => {
+        const width = saved[key];
+        return [key, typeof width === "number" && Number.isFinite(width)
+          ? Math.max(MIN_COLUMN_WIDTHS[key], Math.min(width, 1200))
+          : DEFAULT_COLUMN_WIDTHS[key]];
+      })
+    ) as Record<SortKey, number>;
+  } catch {
+    return { ...DEFAULT_COLUMN_WIDTHS };
+  }
+}
 
 /** Comics are cover-led, so they open in grid by default; books in list. */
 function viewKey(kind: Kind) {
@@ -71,6 +111,8 @@ export default function Library({
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "title", dir: 1 });
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [view, setView] = useState<ViewMode>(() => loadViewMode(kind));
+  const [columnWidths, setColumnWidths] = useState(() => loadColumnWidths(kind));
+  const resizing = useRef<{ key: SortKey; startX: number; startWidth: number } | null>(null);
   /** Comics only: the series currently opened, by group key. */
   const [openSeries, setOpenSeries] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
@@ -87,6 +129,35 @@ export default function Library({
   useEffect(() => {
     localStorage.setItem(viewKey(kind), view);
   }, [view, kind]);
+
+  useEffect(() => {
+    localStorage.setItem(columnWidthKey(kind), JSON.stringify(columnWidths));
+  }, [columnWidths, kind]);
+
+  function startResize(key: SortKey, event: React.PointerEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    resizing.current = { key, startX: event.clientX, startWidth: columnWidths[key] };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveResize(event: React.PointerEvent<HTMLSpanElement>) {
+    const current = resizing.current;
+    if (!current) return;
+    const width = Math.max(MIN_COLUMN_WIDTHS[current.key], Math.min(1200, current.startWidth + event.clientX - current.startX));
+    setColumnWidths((previous) => ({ ...previous, [current.key]: width }));
+  }
+
+  function stopResize() {
+    resizing.current = null;
+  }
+
+  function nudgeColumn(key: SortKey, direction: -1 | 1) {
+    setColumnWidths((previous) => ({
+      ...previous,
+      [key]: Math.max(MIN_COLUMN_WIDTHS[key], Math.min(1200, previous[key] + direction * 16)),
+    }));
+  }
 
   useEffect(() => {
     let alive = true;
@@ -434,16 +505,22 @@ export default function Library({
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-white/10">
-          <table className="w-full min-w-[820px] text-sm">
+          <table
+            className="table-fixed min-w-full text-sm"
+            style={{ width: LIST_COLUMNS.reduce((sum, key) => sum + columnWidths[key], 0) }}
+          >
+            <colgroup>
+              {LIST_COLUMNS.map((key) => <col key={key} style={{ width: columnWidths[key] }} />)}
+            </colgroup>
             <thead>
               <tr className="border-b border-white/10 bg-white/[0.03] text-left text-xs text-slate-400">
-                <Th onClick={() => toggleSort("title")} sort={sort} col="title" className="pl-4">Title</Th>
-                <Th onClick={() => toggleSort("author")} sort={sort} col="author">Author</Th>
-                <Th onClick={() => toggleSort("category")} sort={sort} col="category">Category</Th>
-                <Th onClick={() => toggleSort("status")} sort={sort} col="status">Status</Th>
-                <Th onClick={() => toggleSort("progress")} sort={sort} col="progress">Progress</Th>
-                <Th onClick={() => toggleSort("rating")} sort={sort} col="rating">Rating</Th>
-                <Th onClick={() => toggleSort("pages")} sort={sort} col="pages" className="pr-4 text-right">Pages</Th>
+                <Th onClick={() => toggleSort("title")} sort={sort} col="title" width={columnWidths.title} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn} className="pl-4">Title</Th>
+                <Th onClick={() => toggleSort("author")} sort={sort} col="author" width={columnWidths.author} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn}>Author</Th>
+                <Th onClick={() => toggleSort("category")} sort={sort} col="category" width={columnWidths.category} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn}>Category</Th>
+                <Th onClick={() => toggleSort("status")} sort={sort} col="status" width={columnWidths.status} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn}>Status</Th>
+                <Th onClick={() => toggleSort("progress")} sort={sort} col="progress" width={columnWidths.progress} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn}>Progress</Th>
+                <Th onClick={() => toggleSort("rating")} sort={sort} col="rating" width={columnWidths.rating} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn}>Rating</Th>
+                <Th onClick={() => toggleSort("pages")} sort={sort} col="pages" width={columnWidths.pages} onResizeStart={startResize} onResizeMove={moveResize} onResizeEnd={stopResize} onNudge={nudgeColumn} className="pr-4 text-right">Pages</Th>
               </tr>
             </thead>
             <tbody>
@@ -531,21 +608,52 @@ function Th({
   onClick,
   sort,
   col,
+  width,
+  onResizeStart,
+  onResizeMove,
+  onResizeEnd,
+  onNudge,
   className,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   sort: { key: SortKey; dir: 1 | -1 };
   col: SortKey;
+  width: number;
+  onResizeStart: (key: SortKey, event: React.PointerEvent<HTMLSpanElement>) => void;
+  onResizeMove: (event: React.PointerEvent<HTMLSpanElement>) => void;
+  onResizeEnd: () => void;
+  onNudge: (key: SortKey, direction: -1 | 1) => void;
   className?: string;
 }) {
   const active = sort.key === col;
   return (
-    <th className={cx("select-none px-3 py-2.5 font-medium", className)}>
+    <th className={cx("relative select-none overflow-hidden px-3 py-2.5 font-medium", className)}>
       <button onClick={onClick} className={cx("inline-flex items-center gap-1 hover:text-slate-200", active && "text-slate-200")}>
         {children}
         {active && <span className="text-[10px]">{sort.dir === 1 ? "▲" : "▼"}</span>}
       </button>
+      <span
+        role="separator"
+        aria-label={`Resize ${String(children)} column`}
+        aria-orientation="vertical"
+        aria-valuemin={MIN_COLUMN_WIDTHS[col]}
+        aria-valuemax={1200}
+        aria-valuenow={width}
+        tabIndex={0}
+        title={`Drag to resize ${String(children)}; use arrow keys for fine adjustment`}
+        onPointerDown={(event) => onResizeStart(col, event)}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeEnd}
+        onPointerCancel={onResizeEnd}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          onNudge(col, event.key === "ArrowLeft" ? -1 : 1);
+        }}
+        className="absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize touch-none border-r border-white/10 hover:border-accent-500 focus:border-accent-500 focus:outline-none"
+      />
     </th>
   );
 }
@@ -565,7 +673,6 @@ function BookRow({
 }) {
   const pct = progressPct(book);
   const sm = statusMeta(book.status);
-  const img = assetUrl(book.cover_path);
   return (
     <tr
       onClick={onClick}
@@ -575,37 +682,29 @@ function BookRow({
         active ? "bg-accent-500/10" : striped ? "bg-white/[0.015]" : ""
       )}
     >
-      <td className="py-2 pl-4 pr-3">
-        <div className="flex items-center gap-3">
+      <td className="py-1.5 pl-4 pr-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1 truncate font-medium text-slate-200" title={book.title}>
+            {book.title}
+          </div>
+          <span className="shrink-0 text-[10px] uppercase tracking-wide text-slate-500">{book.format}</span>
           <button
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={(event) => {
+              event.stopPropagation();
               onOpen();
             }}
-            title={`Read in your default ${book.format.toUpperCase()} reader`}
-            className="relative h-11 w-8 shrink-0 overflow-hidden rounded bg-slate-800"
+            aria-label={`Open ${book.title}`}
+            title={`Open ${book.title}`}
+            className="shrink-0 rounded p-0.5 text-slate-500 opacity-0 hover:text-accent-400 focus:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-500 group-hover:opacity-100"
           >
-            {img ? (
-              <img src={img} alt="" className="h-full w-full object-cover" loading="lazy" />
-            ) : (
-              <div className="grid h-full w-full place-items-center text-slate-600">
-                <Icon name="book" className="h-4 w-4" />
-              </div>
-            )}
-            <span className="absolute inset-0 grid place-items-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100">
-              <Icon name="read" className="h-4 w-4 text-on-scrim" />
-            </span>
+            <Icon name="read" className="h-3.5 w-3.5" />
           </button>
-          <div className="min-w-0">
-            <div className="truncate font-medium text-slate-100">{book.title}</div>
-            <div className="truncate text-[11px] uppercase tracking-wide text-slate-500">{book.format}</div>
-          </div>
         </div>
       </td>
       <td className="px-3 text-slate-300">
         <span className="line-clamp-1">{book.author ?? "—"}</span>
       </td>
-      <td className="px-3 text-slate-400">{book.category?.trim() || "—"}</td>
+      <td className="px-3 text-slate-400"><div className="truncate">{book.category?.trim() || "—"}</div></td>
       <td className="px-3">
         <Badge tone={sm.tone}>{sm.label}</Badge>
       </td>
@@ -623,7 +722,7 @@ function BookRow({
       <td className="px-3">
         {book.rating != null ? <StarRating value={book.rating} size="h-3.5 w-3.5" /> : <span className="text-slate-600">—</span>}
       </td>
-      <td className="py-2 pl-3 pr-4 text-right tabular-nums text-slate-300">
+      <td className="py-1.5 pl-3 pr-4 text-right tabular-nums text-slate-300">
         {book.pages?.toLocaleString() ?? "—"}
       </td>
     </tr>
@@ -741,8 +840,6 @@ function SeriesRow({
   striped: boolean;
   onOpen: () => void;
 }) {
-  const lead = shelfCover(group);
-  const img = assetUrl(lead?.cover_path ?? null);
   const authors = new Set(group.books.map((b) => b.author).filter(Boolean) as string[]);
   const cats = new Set(group.books.map((b) => b.category?.trim()).filter(Boolean) as string[]);
   const pages = group.books.reduce((n, b) => n + (b.pages ?? 0), 0);
@@ -756,26 +853,10 @@ function SeriesRow({
         striped ? "bg-white/[0.015]" : ""
       )}
     >
-      <td className="py-2 pl-4 pr-3">
-        <div className="flex items-center gap-3">
-          <div className="relative h-11 w-10 shrink-0">
-            <div className="absolute inset-y-1 left-2 right-0 rounded-sm border border-white/10 bg-slate-600" />
-            <div className="absolute inset-y-0 left-0 right-2 overflow-hidden rounded bg-slate-800">
-              {img ? (
-                <img src={img} alt="" className="h-full w-full object-cover" loading="lazy" />
-              ) : (
-                <div className="grid h-full w-full place-items-center text-slate-600">
-                  <Icon name="books" className="h-4 w-4" />
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="min-w-0">
-            <div className="truncate font-medium text-slate-100">{group.name}</div>
-            <div className="truncate text-[11px] uppercase tracking-wide text-slate-500">
-              Series · {group.books.length} volumes
-            </div>
-          </div>
+      <td className="py-1.5 pl-4 pr-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1 truncate font-medium text-slate-200" title={group.name}>{group.name}</div>
+          <span className="shrink-0 text-[10px] text-slate-500">{group.books.length} volumes</span>
         </div>
       </td>
       <td className="px-3 text-slate-300">
@@ -784,7 +865,7 @@ function SeriesRow({
         </span>
       </td>
       <td className="px-3 text-slate-400">
-        {cats.size === 1 ? [...cats][0] : cats.size > 1 ? "Various" : "—"}
+        <div className="truncate">{cats.size === 1 ? [...cats][0] : cats.size > 1 ? "Various" : "—"}</div>
       </td>
       <td className="px-3">
         <Badge tone="slate">
@@ -805,7 +886,7 @@ function SeriesRow({
       <td className="px-3 text-slate-600">
         <Icon name="chevron" className="h-4 w-4 text-slate-500 transition-transform group-hover:translate-x-0.5" />
       </td>
-      <td className="py-2 pl-3 pr-4 text-right tabular-nums text-slate-300">
+      <td className="py-1.5 pl-3 pr-4 text-right tabular-nums text-slate-300">
         {pages > 0 ? pages.toLocaleString() : "—"}
       </td>
     </tr>

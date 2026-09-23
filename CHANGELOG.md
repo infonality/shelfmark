@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2 — 2026-09-23
+
+### Library list view
+
+- Make book and series titles legible in the light theme.
+- Let readers drag column dividers or use arrow keys to adjust widths, saved separately for books and comics.
+- Remove covers from list rows and reduce row height to show more items at once.
+
 ## 0.7.1 — 2026-09-22
 
 Shelfmark 0.7.1 makes footnote detours more forgiving and updates the app's sidebar description to match its role as a complete digital library.
