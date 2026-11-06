@@ -58,11 +58,6 @@ export default function Dashboard({
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="mt-1 text-sm text-slate-400">Your reading, at a glance.</p>
-      </header>
-
       {loading && !stats ? (
         <div className="flex items-center gap-3 text-slate-400">
           <Spinner className="h-5 w-5" /> Loading…
@@ -109,7 +104,14 @@ export default function Dashboard({
           {/* Currently reading */}
           {stats.in_progress.length > 0 && (
             <section>
-              <h2 className="mb-3 text-sm font-semibold text-slate-300">Continue reading</h2>
+              <div className="mb-3 flex items-baseline justify-between gap-3">
+                <h2 className="text-sm font-semibold text-slate-300">Continue reading</h2>
+                {stats.currently_reading > stats.in_progress.length && (
+                  <span className="text-xs text-slate-500">
+                    Recent {stats.in_progress.length} of {stats.currently_reading.toLocaleString()}
+                  </span>
+                )}
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 {stats.in_progress.map((b) => (
                   <ReadingRow key={b.id} book={b} onOpen={() => open(b)} />

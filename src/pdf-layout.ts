@@ -148,6 +148,21 @@ export function pageAtOffset(tops: number[], y: number): number {
   return best;
 }
 
+/** Keep the same place within a page when the stack is laid out at a new size. */
+export function remapScrollOffset(previous: Stack, next: Stack, oldTop: number): {
+  page: number;
+  top: number;
+} {
+  const page = pageAtOffset(previous.tops, oldTop + 8);
+  const fraction = Math.max(0, Math.min(1,
+    (oldTop - (previous.tops[page] ?? 0)) / (previous.heights[page] || 1)
+  ));
+  return {
+    page,
+    top: (next.tops[page] ?? 0) + fraction * (next.heights[page] || 0),
+  };
+}
+
 /**
  * Which pages to render: everything visible, plus `overscan` screens either
  * side, so scrolling at a normal speed never outruns the renderer.

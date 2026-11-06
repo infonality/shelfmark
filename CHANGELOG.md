@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3 — 2026-11-06
+
+- Keep the current PDF page position and visible bitmap stable when moving a reader window between displays or changing scale.
+- Bundle 512 and 1024 pixel Linux launcher icons for high-density displays.
+- Remove the redundant dashboard heading and subtitle, and show when Continue reading is displaying the most recent 8 items.
+
 ## 0.7.2 — 2026-09-23
 
 ### Library list view

@@ -6,10 +6,12 @@ import {
   PAGE_GAP,
   pageAtOffset,
   pageUrl,
+  remapScrollOffset,
   renderWidth,
   runPrefixes,
   runSlices,
   snapToDevice,
+  Stack,
   stackLayout,
   textBetween,
   textLength,
@@ -149,7 +151,25 @@ export default function PdfReader({
 
   const sizes = session?.pages ?? [];
   const count = sizes.length;
-  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+
+  // A window can cross displays without its CSS size changing. Keep the
+  // raster width in step with the new display's physical pixel density.
+  useEffect(() => {
+    let media: MediaQueryList;
+    const update = () => {
+      setDpr(window.devicePixelRatio || 1);
+      media?.removeEventListener("change", update);
+      media = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      media.addEventListener("change", update);
+    };
+    window.addEventListener("resize", update);
+    update();
+    return () => {
+      window.removeEventListener("resize", update);
+      media?.removeEventListener("change", update);
+    };
+  }, []);
 
   // ---- load ----
   useEffect(() => {
@@ -197,7 +217,12 @@ export default function PdfReader({
       // which has to come off by hand.
       const rect = el.getBoundingClientRect();
       const scrollbar = el.offsetWidth - el.clientWidth;
-      setBox({ w: Math.max(0, rect.width - scrollbar), h: rect.height });
+      const w = Math.max(0, rect.width - scrollbar);
+      setBox((previous) =>
+        previous.w === w && previous.h === rect.height
+          ? previous
+          : { w, h: rect.height }
+      );
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -332,25 +357,30 @@ export default function PdfReader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  /**
-   * Anything that changes how wide a page is drawn — zooming, opening the
-   * contents, resizing the window — moves every page's offset with it. Without
-   * re-anchoring, the scroll position keeps its pixel value and means a
-   * different page: zoom in near the end of a long book and you land back in
-   * the middle of it.
-   */
-  const pageRef = useRef(page);
-  pageRef.current = page;
-  const lastWidth = useRef(0);
-  useEffect(() => {
-    if (mode !== "scroll" || pageWidth < 2) return;
-    const had = lastWidth.current;
-    if (had === pageWidth) return;
-    lastWidth.current = pageWidth;
-    // The first measurement is the initial layout, which the restore above
-    // owns; stepping on it here would send a reopened book back to page one.
-    if (had !== 0) scrollToPage(pageRef.current);
-  }, [pageWidth, mode, scrollToPage]);
+  // Preserve the exact place within a page through a width or scale change.
+  // Snapping to the page top on every intermediate resize made a window moved
+  // between displays visibly jump. Do this before paint so it never shows the
+  // new layout at the old scroll offset.
+  const previousLayout = useRef<{ layout: Stack; width: number; dpr: number } | null>(null);
+  useLayoutEffect(() => {
+    if (mode !== "scroll" || pageWidth < 2) {
+      previousLayout.current = null;
+      return;
+    }
+    const previous = previousLayout.current;
+    previousLayout.current = { layout, width: pageWidth, dpr };
+    const el = scrollRef.current;
+    if (!el || !previous || !restored.current ||
+        (previous.width === pageWidth && previous.dpr === dpr)) return;
+    // The browser may already have clamped scrollTop to the shorter new stack.
+    // The last scroll event still records the reading position in the old one.
+    const { page: oldPage, top: nextTop } = remapScrollOffset(previous.layout, layout, scrollTop);
+    seeking.current = true;
+    el.scrollTop = nextTop;
+    setScrollTop(el.scrollTop);
+    setPage(oldPage);
+    requestAnimationFrame(() => { seeking.current = false; });
+  }, [layout, pageWidth, dpr, mode]);
 
   // ---- what to render ----
   const [first, last] = useMemo(
@@ -1067,22 +1097,18 @@ export default function PdfReader({
                     {!loaded.has(`${i}@${width}`) && (
                       <div className="absolute inset-0 bg-white/5" />
                     )}
-                    <img
+                    <PdfPageImage
                       src={pageUrl(session, i, width)}
                       alt={`Page ${i + 1}`}
-                      onLoad={() => markLoaded(`${i}@${width}`)}
-                      onError={() => markLoaded(`${i}@${width}`)}
-                      draggable={false}
+                      sourceKey={`${i}@${width}`}
+                      markLoaded={markLoaded}
                       // Width only. Forcing the height too means the box and
                       // the bitmap round separately and disagree by a fraction
                       // of a pixel, and the browser scales rather than blits.
                       // Letting the height follow the bitmap's own proportions
                       // keeps it exactly 1:1.
-                      style={{ width: pageWidth }}
-                      className={cx(
-                        "absolute left-0 top-0 h-auto max-w-none select-none bg-white shadow-[0_2px_12px_rgba(0,0,0,.5)] transition-opacity",
-                        loaded.has(`${i}@${width}`) ? "opacity-100" : "opacity-0"
-                      )}
+                      width={pageWidth}
+                      className="absolute left-0 top-0 h-auto max-w-none select-none bg-white shadow-[0_2px_12px_rgba(0,0,0,.5)]"
                     />
                     <TextLayer
                       page={i}
@@ -1134,19 +1160,15 @@ export default function PdfReader({
                       className="relative shrink-0"
                       style={{ width: pageWidth, height }}
                     >
-                      <img
+                      <PdfPageImage
                         src={pageUrl(session, i, width)}
                         alt={`Page ${i + 1}`}
-                        onLoad={() => markLoaded(`${i}@${width}`)}
-                        onError={() => markLoaded(`${i}@${width}`)}
-                        draggable={false}
+                        sourceKey={`${i}@${width}`}
+                        markLoaded={markLoaded}
                         // Width only, so the bitmap keeps its own proportions
                         // and is blitted rather than scaled.
-                        style={{ width: pageWidth }}
-                        className={cx(
-                          "absolute left-0 top-0 h-auto max-w-none select-none bg-white",
-                          ready ? "opacity-100" : "opacity-0"
-                        )}
+                        width={pageWidth}
+                        className="absolute left-0 top-0 h-auto max-w-none select-none bg-white"
                       />
                       <TextLayer
                         page={i}
@@ -1213,6 +1235,49 @@ export default function PdfReader({
         </footer>
       )}
     </div>
+  );
+}
+
+/** Keep the last bitmap visible while a page is rerendered for a new size. */
+function PdfPageImage({ src, sourceKey, width, alt, className, markLoaded }: {
+  src: string;
+  sourceKey: string;
+  width: number;
+  alt: string;
+  className: string;
+  markLoaded: (key: string) => void;
+}) {
+  const [shownSrc, setShownSrc] = useState(src);
+  const [shownReady, setShownReady] = useState(false);
+
+  useEffect(() => {
+    if (src === shownSrc) return;
+    let active = true;
+    const next = new Image();
+    next.onload = () => {
+      if (!active) return;
+      markLoaded(sourceKey);
+      setShownReady(true);
+      setShownSrc(src);
+    };
+    next.onerror = () => { if (active) markLoaded(sourceKey); };
+    next.src = src;
+    return () => { active = false; };
+  }, [src, shownSrc, sourceKey, markLoaded]);
+
+  return (
+    <img
+      src={shownSrc}
+      alt={alt}
+      draggable={false}
+      style={{ width }}
+      className={cx(className, shownReady ? "opacity-100" : "opacity-0")}
+      onLoad={() => {
+        setShownReady(true);
+        if (shownSrc === src) markLoaded(sourceKey);
+      }}
+      onError={() => { if (shownSrc === src) markLoaded(sourceKey); }}
+    />
   );
 }
 
